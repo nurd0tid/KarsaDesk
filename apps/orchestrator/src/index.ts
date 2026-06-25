@@ -1,0 +1,945 @@
+import Fastify from "fastify";
+import cors from "@fastify/cors";
+import websocket from "@fastify/websocket";
+import sensible from "@fastify/sensible";
+import fs from "node:fs";
+import path from "node:path";
+import { randomUUID } from "node:crypto";
+import { z } from "zod";
+import {
+  CreateProjectSchema,
+  CreateAiFileActionSchema,
+  CreateConnectedFileSchema,
+  CreateTaskSchema,
+  QueueModeSchema,
+  ReviewDecisionSchema,
+  type ConnectedFile,
+  type AiFileAction,
+  type NormalizedEvent,
+  type Task,
+} from "@vk/contracts";
+import { config } from "./config.js";
+import {
+  activeTemplate,
+  detachConnectedFile,
+  getConnectedFile,
+  getProject,
+  getSession,
+  getTask,
+  listAiFileActions,
+  listConnectedFiles,
+  listDailyLogs,
+  listEvents,
+  listAllTasks,
+  listProjects,
+  listSessions,
+  listTasks,
+  nextTaskNumber,
+  saveDailyLog,
+  saveAiFileAction,
+  saveConnectedFile,
+  saveProject,
+  saveReview,
+  saveSession,
+  saveTask,
+  updateSession,
+  updateTask,
+} from "./db.js";
+import {
+  checkpoint,
+  createWorktree,
+  discardManagedChanges,
+  getDiff,
+  inspectProject,
+  listDirectories,
+  pickFolderNative,
+  openInVsCode,
+  paginateDiff,
+  squashMerge,
+} from "./git.js";
+import { eventHub } from "./event-hub.js";
+import { nocoHealth, setupNocoDb, syncOutboxOnce } from "./nocodb.js";
+import { openCode } from "./opencode.js";
+import { terminals } from "./terminal.js";
+
+const app = Fastify({
+  logger: { level: process.env.NODE_ENV === "test" ? "silent" : "info" },
+  bodyLimit: 2 * 1024 * 1024,
+});
+
+await app.register(cors, {
+  origin(origin, callback) {
+    if (!origin || config.allowedOrigins.includes(origin)) callback(null, true);
+    else callback(new Error("Origin is not allowed"), false);
+  },
+  methods: ["GET", "POST", "PATCH", "DELETE"],
+  allowedHeaders: ["content-type", "x-vk-local-secret"],
+});
+await app.register(sensible);
+await app.register(websocket);
+
+function isAuthorized(request: {
+  headers: Record<string, unknown>;
+  query?: unknown;
+}) {
+  const header = request.headers["x-vk-local-secret"];
+  const query = request.query as { token?: string } | undefined;
+  return header === config.localSecret || query?.token === config.localSecret;
+}
+
+app.addHook("onRequest", async (request, reply) => {
+  if (request.url === "/health") return;
+  const origin = request.headers.origin;
+  if (origin && !config.allowedOrigins.includes(origin))
+    return reply.code(403).send({ error: "Origin is not allowed" });
+  if (!isAuthorized(request))
+    return reply.code(401).send({ error: "Invalid local runtime token" });
+});
+
+app.get("/health", async () => ({
+  ok: true,
+  service: "karsadesk-orchestrator",
+  noco: nocoHealth(),
+}));
+
+app.get("/api/filesystem", async (request) => {
+  const query = z.object({ path: z.string().optional() }).parse(request.query);
+  return listDirectories(query.path);
+});
+
+app.post("/api/filesystem/pick-folder", async () => pickFolderNative());
+
+app.get("/api/opencode/probe", async () => ({ probe: await openCode.probe() }));
+
+app.post("/api/documents/read", async (request) => {
+  const input = z.object({ path: z.string().min(1) }).parse(request.body);
+  const resolved = await fs.promises.realpath(path.resolve(input.path));
+  const stat = await fs.promises.stat(resolved);
+  if (!stat.isFile())
+    throw app.httpErrors.badRequest("Selected path is not a file");
+  if (stat.size > 25 * 1024 * 1024)
+    throw app.httpErrors.badRequest(
+      "Document preview supports files up to 25 MB",
+    );
+  const ext = path.extname(resolved).toLowerCase();
+  const allowed = new Set([
+    ".docx",
+    ".pptx",
+    ".xlsx",
+    ".csv",
+    ".tsv",
+    ".md",
+    ".txt",
+  ]);
+  if (!allowed.has(ext))
+    throw app.httpErrors.badRequest(
+      "Supported documents: .docx, .pptx, .xlsx, .csv, .tsv, .md, .txt",
+    );
+  const buffer = await fs.promises.readFile(resolved);
+  return {
+    name: path.basename(resolved),
+    size: stat.size,
+    base64: buffer.toString("base64"),
+  };
+});
+
+app.get("/api/projects", async () => listProjects());
+app.post("/api/projects", async (request, reply) => {
+  const input = CreateProjectSchema.parse(request.body);
+  const existing = listProjects().find(
+    (project) =>
+      path.resolve(project.localPath).toLowerCase() ===
+      path.resolve(input.path).toLowerCase(),
+  );
+  if (existing) return existing;
+  const project = await inspectProject(input.path, input.name);
+  saveProject(project);
+  return reply.code(201).send(project);
+});
+
+app.post("/api/projects/:projectUid/refresh", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  const refreshed = await inspectProject(project.localPath, project.name);
+  const result = {
+    ...refreshed,
+    uid: project.uid,
+    createdAt: project.createdAt,
+    dailyLogMirror: project.dailyLogMirror,
+    dailyLogPath: project.dailyLogPath,
+  };
+  saveProject(result);
+  return result;
+});
+
+app.get("/api/projects/:projectUid/tasks", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const query = z
+    .object({
+      page: z.coerce.number().int().positive().default(1),
+      pageSize: z.coerce.number().int().positive().max(200).default(60),
+      query: z.string().default(""),
+    })
+    .parse(request.query);
+  return listTasks(projectUid, query.page, query.pageSize, query.query);
+});
+
+app.post("/api/projects/:projectUid/tasks", async (request, reply) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  if (!getProject(projectUid))
+    throw app.httpErrors.notFound("Project not found");
+  const input = CreateTaskSchema.parse(request.body);
+  const number = nextTaskNumber(projectUid);
+  const now = new Date().toISOString();
+  const task: Task = {
+    uid: randomUUID(),
+    projectUid,
+    number,
+    title: input.title,
+    roughPrompt: input.roughPrompt || input.refinedPrompt,
+    refinedPrompt: input.refinedPrompt,
+    acceptanceCriteria: input.acceptanceCriteria || [],
+    verification: input.verification || [],
+    dependencyUids: input.dependencyUids || [],
+    priority: input.priority || "medium",
+    mode: input.mode || "build",
+    status: "backlog",
+    sortOrder: number * 1000,
+    source: input.source || "manual",
+    assignedSessionUid: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  saveTask(task);
+  return reply.code(201).send(task);
+});
+
+app.patch("/api/tasks/:taskUid", async (request) => {
+  const { taskUid } = z
+    .object({ taskUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      title: z.string().min(1).optional(),
+      roughPrompt: z.string().optional(),
+      refinedPrompt: z.string().optional(),
+      acceptanceCriteria: z.array(z.string()).optional(),
+      verification: z.array(z.string()).optional(),
+      dependencyUids: z.array(z.string().uuid()).optional(),
+      priority: z.enum(["low", "medium", "high", "urgent"]).optional(),
+      mode: z.enum(["plan", "build"]).optional(),
+      status: z
+        .enum([
+          "backlog",
+          "ready",
+          "running",
+          "waiting_approval",
+          "review",
+          "done",
+          "failed",
+          "cancelled",
+        ])
+        .optional(),
+      sortOrder: z.number().optional(),
+      assignedSessionUid: z.string().uuid().nullable().optional(),
+    })
+    .parse(request.body);
+  return updateTask(taskUid, input);
+});
+
+function inferConnectedFile(input: {
+  externalFileUrl: string;
+  provider?: "google" | "figma";
+  fileType?: "docs" | "sheets" | "slides" | "figma";
+  fileName?: string;
+}) {
+  const url = new URL(input.externalFileUrl);
+  const provider =
+    input.provider || (url.hostname.includes("figma.com") ? "figma" : "google");
+  const pathParts = url.pathname.split("/").filter(Boolean);
+  let fileType = input.fileType;
+  let externalFileId = "";
+  if (provider === "figma") {
+    fileType = "figma";
+    const fileIndex = pathParts.findIndex((part) => part === "file");
+    externalFileId =
+      fileIndex >= 0 ? pathParts[fileIndex + 1] || url.pathname : url.pathname;
+  } else {
+    if (!fileType) {
+      if (url.hostname.includes("docs.google.com")) {
+        if (pathParts.includes("spreadsheets")) fileType = "sheets";
+        else if (pathParts.includes("presentation")) fileType = "slides";
+        else fileType = "docs";
+      } else fileType = "docs";
+    }
+    const marker =
+      fileType === "sheets" ? "d" : fileType === "slides" ? "d" : "d";
+    const markerIndex = pathParts.findIndex((part) => part === marker);
+    externalFileId =
+      markerIndex >= 0
+        ? pathParts[markerIndex + 1] || url.pathname
+        : url.pathname;
+  }
+  const fileName =
+    input.fileName?.trim() ||
+    (provider === "figma" ? "Figma file" : `Google ${fileType}`);
+  return { provider, fileType: fileType || "docs", externalFileId, fileName };
+}
+
+app.get("/api/tasks/:taskUid/connected-files", async (request) => {
+  const { taskUid } = z
+    .object({ taskUid: z.string().uuid() })
+    .parse(request.params);
+  if (!getTask(taskUid)) throw app.httpErrors.notFound("Task not found");
+  return {
+    files: listConnectedFiles(taskUid),
+    actions: listAiFileActions(taskUid),
+  };
+});
+
+app.post("/api/tasks/:taskUid/connected-files", async (request, reply) => {
+  const { taskUid } = z
+    .object({ taskUid: z.string().uuid() })
+    .parse(request.params);
+  if (!getTask(taskUid)) throw app.httpErrors.notFound("Task not found");
+  const input = CreateConnectedFileSchema.parse(request.body);
+  const inferred = inferConnectedFile(input);
+  const now = new Date().toISOString();
+  const value: ConnectedFile = {
+    uid: randomUUID(),
+    taskUid,
+    provider: inferred.provider,
+    fileType: inferred.fileType,
+    externalFileId: inferred.externalFileId,
+    externalFileUrl: input.externalFileUrl,
+    fileName: inferred.fileName,
+    thumbnailUrl: null,
+    metadata: {
+      source: "manual-url",
+      note: "OAuth/API sync is scaffolded; user still edits in the original Google/Figma app.",
+    },
+    status: "connected",
+    createdAt: now,
+    updatedAt: now,
+  };
+  saveConnectedFile(value);
+  return reply.code(201).send(value);
+});
+
+app.delete("/api/connected-files/:fileUid", async (request) => {
+  const { fileUid } = z
+    .object({ fileUid: z.string().uuid() })
+    .parse(request.params);
+  detachConnectedFile(fileUid);
+  return { ok: true };
+});
+
+app.post("/api/tasks/:taskUid/ai-file-actions", async (request, reply) => {
+  const { taskUid } = z
+    .object({ taskUid: z.string().uuid() })
+    .parse(request.params);
+  const task = getTask(taskUid);
+  if (!task) throw app.httpErrors.notFound("Task not found");
+  const input = CreateAiFileActionSchema.parse(request.body);
+  const file = getConnectedFile(input.connectedFileUid);
+  if (!file || file.taskUid !== taskUid)
+    throw app.httpErrors.notFound("Connected file not found");
+  const now = new Date().toISOString();
+  const resultSummary = [
+    `AI plan prepared for ${file.fileName}.`,
+    `Prompt: ${input.prompt}`,
+    "MVP safety: KarsaDesk did not modify the original file yet.",
+    file.provider === "google"
+      ? "Next integration step: Google OAuth + Drive/Docs/Sheets/Slides API apply/preview."
+      : "Next integration step: Figma metadata API now, Figma Plugin for selected-frame edits later.",
+  ].join("\n");
+  const action: AiFileAction = {
+    uid: randomUUID(),
+    taskUid,
+    connectedFileUid: file.uid,
+    prompt: input.prompt,
+    actionType: input.actionType || "plan",
+    status: "success",
+    resultSummary,
+    errorMessage: null,
+    createdAt: now,
+    updatedAt: now,
+  };
+  saveAiFileAction(action);
+  return reply.code(201).send(action);
+});
+
+app.get("/api/projects/:projectUid/opencode", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  const probe = await openCode.probe();
+  if (!probe.installed) return { probe, providers: [] };
+  return { probe, providers: await openCode.discover(project.localPath) };
+});
+
+app.post("/api/projects/:projectUid/smart-prompt", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      roughPrompt: z.string().min(10),
+      providerId: z.string().min(1),
+      modelId: z.string().min(1),
+    })
+    .parse(request.body);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  const context = project.memoryFiles.length
+    ? `Project memory files: ${project.memoryFiles.join(", ")}.`
+    : "No standard project memory files were detected.";
+  const prompt = `${activeTemplate()}\n\n${context}\n\nRough request:\n${input.roughPrompt}`;
+  return openCode.generatePlan(
+    project.localPath,
+    input.providerId,
+    input.modelId,
+    prompt,
+  );
+});
+
+app.get("/api/projects/:projectUid/sessions", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  return listSessions(projectUid);
+});
+
+app.post("/api/projects/:projectUid/sessions", async (request, reply) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      name: z.string().min(1),
+      providerId: z.string().min(1),
+      modelId: z.string().min(1),
+      agentMode: z.enum(["plan", "build"]).default("build"),
+      permissionMode: z.enum(["supervised", "auto"]).default("supervised"),
+      targetBranch: z.string().min(1),
+    })
+    .parse(request.body);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  const session = await createWorktree(project, {
+    sessionUid: randomUUID(),
+    ...input,
+  });
+  saveSession(session);
+  return reply.code(201).send(session);
+});
+
+app.post("/api/projects/:projectUid/open-vscode", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  openInVsCode(project.localPath);
+  return { ok: true };
+});
+
+app.post("/api/sessions/:sessionUid/open-vscode", async (request) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  openInVsCode(session.worktreePath);
+  return { ok: true };
+});
+
+app.get("/api/sessions/:sessionUid/events", async (request) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const query = z
+    .object({
+      page: z.coerce.number().int().positive().default(1),
+      pageSize: z.coerce.number().int().positive().max(250).default(100),
+    })
+    .parse(request.query);
+  return listEvents(sessionUid, query.page, query.pageSize);
+});
+
+function publish(
+  sessionUid: string,
+  taskUid: string | null,
+  type: NormalizedEvent["type"],
+  title: string,
+  body: string,
+  metadata: Record<string, unknown> = {},
+) {
+  eventHub.publish({
+    uid: randomUUID(),
+    sessionUid,
+    taskUid,
+    type,
+    title,
+    body,
+    metadata,
+    createdAt: new Date().toISOString(),
+  });
+}
+
+async function writeDailyLog(
+  projectUid: string,
+  sessionUid: string,
+  task: Task,
+  result: string,
+) {
+  const project = getProject(projectUid);
+  const session = getSession(sessionUid);
+  if (!project || !session) return;
+  const diff = await getDiff(session);
+  const uid = randomUUID();
+  const date = new Date().toISOString().slice(0, 10);
+  const value = {
+    uid,
+    projectUid,
+    sessionUid,
+    taskUid: task.uid,
+    date,
+    prompt: task.refinedPrompt,
+    plan:
+      task.mode === "plan"
+        ? result
+        : "Executed the approved task prompt in the active OpenCode session.",
+    changedFiles: diff.files.map((file) => file.path),
+    verification: task.verification,
+    result,
+    status: "done",
+    blockers: "",
+    nextSteps:
+      "Review the session diff and approve, request changes, or reject.",
+    mirroredAt: null as string | null,
+    createdAt: new Date().toISOString(),
+  };
+  if (project.dailyLogMirror) {
+    const relative = project.dailyLogPath.replace("YYYY-MM-DD", date);
+    const file = path.join(session.worktreePath, relative);
+    await fs.promises.mkdir(path.dirname(file), { recursive: true });
+    const marker = `<!-- vk-log:${uid} -->`;
+    const current = fs.existsSync(file)
+      ? await fs.promises.readFile(file, "utf8")
+      : `# Daily Log — ${date}\n`;
+    if (!current.includes(marker)) {
+      const block = `\n---\n\n## Kanban Task ${task.number} — ${task.title}\n${marker}\n\n### Prompt\n${task.refinedPrompt}\n\n### Plan\n${value.plan}\n\n### Changed Files\n${value.changedFiles.length ? value.changedFiles.map((item) => `- ${item}`).join("\n") : "- No file changes"}\n\n### Verification\n${value.verification.length ? value.verification.map((item) => `- ${item}`).join("\n") : "- Not recorded"}\n\n### Result\n${result}\n\n### Status\ndone\n\n### Blockers and Next Steps\nReview and merge the session diff.\n`;
+      await fs.promises.writeFile(file, `${current.trimEnd()}${block}`, "utf8");
+      value.mirroredAt = new Date().toISOString();
+    }
+  }
+  saveDailyLog(value);
+}
+
+async function runBatch(sessionUid: string) {
+  let session = getSession(sessionUid);
+  if (!session) return;
+  const taskUids = [...session.pendingTaskUids];
+  updateSession(sessionUid, { status: "running" });
+  publish(
+    sessionUid,
+    null,
+    "session.status",
+    "Batch started",
+    `${taskUids.length} task(s) queued`,
+  );
+  for (const taskUid of taskUids) {
+    const task = getTask(taskUid);
+    session = getSession(sessionUid);
+    if (!task || !session) continue;
+    updateSession(sessionUid, {
+      pendingTaskUids: session.pendingTaskUids.filter((uid) => uid !== taskUid),
+    });
+    const blocked = task.dependencyUids.some((dependencyUid) => {
+      const dependency = getTask(dependencyUid);
+      return dependency && !["done", "review"].includes(dependency.status);
+    });
+    if (blocked) {
+      updateTask(task.uid, { status: "failed" });
+      updateSession(sessionUid, { status: "paused", activeTaskUid: task.uid });
+      publish(
+        sessionUid,
+        task.uid,
+        "error",
+        "Dependency blocked",
+        "A required task has not completed",
+      );
+      return;
+    }
+    updateTask(task.uid, { status: "running", assignedSessionUid: sessionUid });
+    updateSession(sessionUid, { status: "running", activeTaskUid: task.uid });
+    publish(
+      sessionUid,
+      task.uid,
+      "session.status",
+      `Task ${task.number} started`,
+      task.title,
+    );
+    const prompt = `${task.refinedPrompt}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- Follow the task exactly."}\n\nVerification:\n${task.verification.map((item) => `- ${item}`).join("\n") || "- Run proportionate verification."}`;
+    try {
+      const response = await openCode.send(session, task, prompt, (event) =>
+        eventHub.publish(event),
+      );
+      await writeDailyLog(
+        task.projectUid,
+        sessionUid,
+        task,
+        response.text || "OpenCode completed the task.",
+      );
+      session = getSession(sessionUid)!;
+      await checkpoint(session, task.number, task.title);
+      updateTask(task.uid, { status: "review" });
+      publish(
+        sessionUid,
+        task.uid,
+        "process.exit",
+        `Task ${task.number} completed`,
+        "Checkpoint created",
+        { exitCode: 0 },
+      );
+      session = getSession(sessionUid)!;
+      if (
+        session.reviewGate === "each_task" &&
+        session.pendingTaskUids.length > 0
+      ) {
+        updateSession(sessionUid, {
+          status: "review",
+          activeTaskUid: task.uid,
+        });
+        publish(
+          sessionUid,
+          task.uid,
+          "session.status",
+          "Manual review required",
+          `${session.pendingTaskUids.length} task(s) remain in this queue`,
+        );
+        return;
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      updateTask(task.uid, { status: "failed" });
+      updateSession(sessionUid, { status: "paused", activeTaskUid: task.uid });
+      publish(
+        sessionUid,
+        task.uid,
+        "error",
+        `Task ${task.number} failed`,
+        message,
+      );
+      return;
+    }
+  }
+  updateSession(sessionUid, { status: "review", activeTaskUid: null });
+  publish(
+    sessionUid,
+    null,
+    "session.status",
+    "Batch ready for review",
+    "Inspect the aggregate diff before merging",
+  );
+}
+
+app.post("/api/sessions/:sessionUid/run", async (request, reply) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      mode: QueueModeSchema,
+      taskUids: z.array(z.string().uuid()).default([]),
+      reviewGate: z.enum(["each_task", "batch_end"]).default("batch_end"),
+    })
+    .parse(request.body);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  if (["running", "starting"].includes(session.status))
+    return reply.code(409).send({ error: "Session is already running" });
+  let taskUids = input.taskUids;
+  const ready = listAllTasks(session.projectUid).filter(
+    (task) => task.status === "ready" || task.status === "failed",
+  );
+  if (input.mode === "next")
+    taskUids = ready.slice(0, 1).map((task) => task.uid);
+  if (input.mode === "all") taskUids = ready.map((task) => task.uid);
+  if (!taskUids.length)
+    return reply.code(400).send({ error: "No tasks are ready to run" });
+  for (const uid of taskUids)
+    updateTask(uid, { assignedSessionUid: sessionUid });
+  updateSession(sessionUid, {
+    pendingTaskUids: taskUids,
+    reviewGate: input.reviewGate,
+    status: "starting",
+  });
+  void runBatch(sessionUid);
+  return reply.code(202).send({ accepted: true, taskUids });
+});
+
+app.post("/api/sessions/:sessionUid/continue", async (request, reply) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  if (session.status !== "review" || !session.pendingTaskUids.length)
+    return reply
+      .code(409)
+      .send({ error: "No reviewed queue is waiting to continue" });
+  updateSession(sessionUid, { status: "starting", activeTaskUid: null });
+  void runBatch(sessionUid);
+  return reply
+    .code(202)
+    .send({ accepted: true, remaining: session.pendingTaskUids.length });
+});
+
+app.post("/api/sessions/:sessionUid/cancel", async (request) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  await openCode.cancel(session);
+  updateSession(sessionUid, { status: "paused" });
+  publish(
+    sessionUid,
+    session.activeTaskUid,
+    "session.status",
+    "Session paused",
+    "The active OpenCode request was cancelled",
+  );
+  return { ok: true };
+});
+
+app.post("/api/sessions/:sessionUid/discard", async (request) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  await discardManagedChanges(session);
+  if (session.activeTaskUid)
+    updateTask(session.activeTaskUid, { status: "cancelled" });
+  updateSession(sessionUid, { status: "paused", activeTaskUid: null });
+  return { ok: true };
+});
+
+app.post(
+  "/api/sessions/:sessionUid/permissions/:permissionId",
+  async (request) => {
+    const { sessionUid, permissionId } = z
+      .object({ sessionUid: z.string().uuid(), permissionId: z.string() })
+      .parse(request.params);
+    const input = z
+      .object({ response: z.enum(["once", "always", "reject"]) })
+      .parse(request.body);
+    const session = getSession(sessionUid);
+    if (!session) throw app.httpErrors.notFound("Session not found");
+    await openCode.respondPermission(session, permissionId, input.response);
+    publish(
+      sessionUid,
+      session.activeTaskUid,
+      "permission.resolved",
+      "Permission resolved",
+      input.response,
+      { permissionId },
+    );
+    return { ok: true };
+  },
+);
+
+app.get("/api/sessions/:sessionUid/diff", async (request) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  const query = z
+    .object({
+      page: z.coerce.number().int().positive().default(1),
+      pageSize: z.coerce.number().int().positive().max(5000).default(1200),
+      file: z.string().optional(),
+    })
+    .parse(request.query);
+  return paginateDiff(
+    await getDiff(session),
+    query.page,
+    query.pageSize,
+    query.file,
+  );
+});
+
+app.post("/api/sessions/:sessionUid/review", async (request, reply) => {
+  const { sessionUid } = z
+    .object({ sessionUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      decision: ReviewDecisionSchema,
+      action: z.enum(["continue", "merge"]).default("merge"),
+      summary: z.string().default(""),
+      comments: z
+        .array(
+          z.object({
+            path: z.string(),
+            line: z.number().optional(),
+            body: z.string(),
+          }),
+        )
+        .default([]),
+      diffHash: z.string(),
+    })
+    .parse(request.body);
+  let session = getSession(sessionUid);
+  if (!session) throw app.httpErrors.notFound("Session not found");
+  const currentDiff = await getDiff(session);
+  if (currentDiff.hash !== input.diffHash)
+    return reply.code(409).send({
+      error: "The diff changed; review the latest version before deciding",
+      diffHash: currentDiff.hash,
+    });
+  saveReview({
+    uid: randomUUID(),
+    sessionUid,
+    taskUid: session.activeTaskUid,
+    decision: input.decision,
+    summary: input.summary,
+    comments: input.comments,
+    diffHash: input.diffHash,
+    createdAt: new Date().toISOString(),
+  });
+  if (input.decision === "request_changes") {
+    const feedback = `Address this review feedback without discarding unrelated valid work:\n${input.summary}\n${input.comments.map((comment) => `- ${comment.path}${comment.line ? `:${comment.line}` : ""}: ${comment.body}`).join("\n")}`;
+    updateSession(sessionUid, { status: "running" });
+    void openCode
+      .send(session, null, feedback, (event) => eventHub.publish(event))
+      .then(async () => {
+        session = getSession(sessionUid)!;
+        await checkpoint(session, 0, "review feedback");
+        updateSession(sessionUid, { status: "review" });
+      })
+      .catch((error) => {
+        updateSession(sessionUid, { status: "paused" });
+        publish(
+          sessionUid,
+          null,
+          "error",
+          "Review follow-up failed",
+          error instanceof Error ? error.message : String(error),
+        );
+      });
+    return { accepted: true };
+  }
+  if (input.decision === "reject") {
+    updateSession(sessionUid, { status: "paused" });
+    return { accepted: true };
+  }
+  if (input.action === "continue") {
+    if (!session.pendingTaskUids.length)
+      return reply
+        .code(409)
+        .send({ error: "No queued task remains; use final merge instead" });
+    updateSession(sessionUid, { status: "starting", activeTaskUid: null });
+    void runBatch(sessionUid);
+    return {
+      accepted: true,
+      continuing: true,
+      remaining: session.pendingTaskUids.length,
+    };
+  }
+  const project = getProject(session.projectUid)!;
+  const head = await squashMerge(
+    project,
+    session,
+    input.summary || `Merge ${session.name}`,
+  );
+  for (const task of listAllTasks(session.projectUid).filter(
+    (item) =>
+      item.assignedSessionUid === sessionUid && item.status === "review",
+  ))
+    updateTask(task.uid, { status: "done" });
+  updateSession(sessionUid, {
+    status: "idle",
+    baseCommit: head,
+    activeTaskUid: null,
+    pendingTaskUids: [],
+  });
+  publish(sessionUid, null, "session.status", "Changes merged", head, { head });
+  return { accepted: true, head };
+});
+
+app.get("/api/projects/:projectUid/daily-logs", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const query = z
+    .object({
+      page: z.coerce.number().int().positive().default(1),
+      pageSize: z.coerce.number().int().positive().max(100).default(30),
+    })
+    .parse(request.query);
+  return listDailyLogs(projectUid, query.page, query.pageSize);
+});
+
+app.get("/api/nocodb/status", async () => nocoHealth());
+app.post("/api/nocodb/setup", async () => setupNocoDb());
+app.post("/api/nocodb/sync", async () => syncOutboxOnce());
+
+app.get("/ws/events", { websocket: true }, (socket, request) => {
+  const query = z
+    .object({ sessionUid: z.string().uuid(), token: z.string() })
+    .parse(request.query);
+  eventHub.subscribe(query.sessionUid, socket);
+});
+
+app.get("/ws/terminal", { websocket: true }, (socket, request) => {
+  const query = z
+    .object({ sessionUid: z.string().uuid(), token: z.string() })
+    .parse(request.query);
+  terminals.attach(query.sessionUid, socket);
+});
+
+app.setErrorHandler((error, _request, reply) => {
+  const status =
+    (error as { statusCode?: number }).statusCode ||
+    (error instanceof z.ZodError ? 400 : 500);
+  reply.code(status).send({
+    error: error instanceof Error ? error.message : String(error),
+    details: error instanceof z.ZodError ? error.issues : undefined,
+  });
+});
+
+setInterval(
+  () =>
+    void syncOutboxOnce().catch((error) =>
+      app.log.warn({ error }, "NocoDB sync failed"),
+    ),
+  15_000,
+).unref();
+
+const shutdown = async () => {
+  for (const project of listProjects())
+    for (const session of listSessions(project.uid)) {
+      await openCode.stop(session.uid);
+      terminals.stop(session.uid);
+    }
+  await app.close();
+  process.exit(0);
+};
+process.on("SIGINT", shutdown);
+process.on("SIGTERM", shutdown);
+
+await app.listen({ host: config.host, port: config.port });

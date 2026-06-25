@@ -1,0 +1,615 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
+import {
+  ArrowLeft,
+  Bot,
+  Check,
+  CircleStop,
+  Code2,
+  FileClock,
+  GitCompareArrows,
+  Loader2,
+  MessageSquareText,
+  Play,
+  RefreshCw,
+  ShieldCheck,
+  TerminalSquare,
+  XCircle,
+} from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import { toast } from "sonner";
+import type {
+  NormalizedEvent,
+  Paginated,
+  Project,
+  Session,
+  Task,
+} from "@vk/contracts";
+import type { ApiClient } from "@/lib/api";
+import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { DiffPanel, type DiffData } from "@/components/diff-panel";
+import { TerminalPanel } from "@/components/terminal-panel";
+import { cn } from "@/lib/utils";
+
+type Tab = "console" | "changes" | "terminal" | "logs";
+
+export function SessionWorkspace({
+  api,
+  project,
+  session,
+  tasks,
+  onBack,
+  onRefresh,
+}: {
+  api: ApiClient;
+  project: Project;
+  session: Session;
+  tasks: Task[];
+  onBack: () => void;
+  onRefresh: () => Promise<void>;
+}) {
+  const [tab, setTab] = useState<Tab>("console");
+  const [events, setEvents] = useState<NormalizedEvent[]>([]);
+  const [eventPage, setEventPage] = useState(1);
+  const [hasOlderEvents, setHasOlderEvents] = useState(false);
+  const [diff, setDiff] = useState<DiffData | null>(null);
+  const [logs, setLogs] = useState<Array<Record<string, unknown>>>([]);
+  const [logPage, setLogPage] = useState(1);
+  const [hasMoreLogs, setHasMoreLogs] = useState(false);
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewMode, setReviewMode] = useState<"approve" | "request_changes">(
+    "request_changes",
+  );
+  const [summary, setSummary] = useState("");
+  const [commentPath, setCommentPath] = useState("");
+  const [commentLine, setCommentLine] = useState("");
+  const [commentBody, setCommentBody] = useState("");
+  const [busy, setBusy] = useState(false);
+  const sessionTasks = tasks.filter(
+    (task) => task.assignedSessionUid === session.uid,
+  );
+  async function load() {
+    const [eventData, diffData, logData] = await Promise.all([
+      api.get<Paginated<NormalizedEvent>>(
+        `/api/sessions/${session.uid}/events?page=1&pageSize=100`,
+      ),
+      api.get<DiffData>(
+        `/api/sessions/${session.uid}/diff?page=1&pageSize=1200`,
+      ),
+      api.get<Paginated<Record<string, unknown>>>(
+        `/api/projects/${project.uid}/daily-logs?page=1&pageSize=30`,
+      ),
+    ]);
+    setEvents(eventData.items);
+    setEventPage(1);
+    setHasOlderEvents(eventData.hasMore);
+    setDiff(diffData);
+    setLogs(logData.items.filter((log) => log.sessionUid === session.uid));
+    setLogPage(1);
+    setHasMoreLogs(logData.hasMore);
+  }
+  async function loadOlderEvents() {
+    const next = eventPage + 1;
+    const data = await api.get<Paginated<NormalizedEvent>>(
+      `/api/sessions/${session.uid}/events?page=${next}&pageSize=100`,
+    );
+    setEvents((current) => [...data.items, ...current]);
+    setEventPage(next);
+    setHasOlderEvents(data.hasMore);
+  }
+  async function loadMoreLogs() {
+    const next = logPage + 1;
+    const data = await api.get<Paginated<Record<string, unknown>>>(
+      `/api/projects/${project.uid}/daily-logs?page=${next}&pageSize=30`,
+    );
+    setLogs((current) => [
+      ...current,
+      ...data.items.filter((log) => log.sessionUid === session.uid),
+    ]);
+    setLogPage(next);
+    setHasMoreLogs(data.hasMore);
+  }
+  async function loadMoreDiff() {
+    if (!diff?.hasMore) return;
+    const next = diff.page + 1;
+    const data = await api.get<DiffData>(
+      `/api/sessions/${session.uid}/diff?page=${next}&pageSize=${diff.pageSize}`,
+    );
+    setDiff({ ...data, diff: `${diff.diff}\n${data.diff}`, page: next });
+  }
+  useEffect(() => {
+    void load();
+    const socket = api.websocket(
+      `/ws/events?sessionUid=${encodeURIComponent(session.uid)}`,
+    );
+    socket.addEventListener("message", (event) => {
+      const value = JSON.parse(event.data) as NormalizedEvent;
+      setEvents((current) => [...current, value]);
+      if (["process.exit", "session.status"].includes(value.type)) {
+        void load();
+        void onRefresh();
+      }
+    });
+    return () => socket.close();
+  }, [api, session.uid]);
+  const tabs: Array<{ id: Tab; label: string; icon: typeof Bot }> = [
+    { id: "console", label: "Agent", icon: Bot },
+    {
+      id: "changes",
+      label: `Changes ${diff?.files.length || 0}`,
+      icon: GitCompareArrows,
+    },
+    { id: "terminal", label: "Terminal", icon: TerminalSquare },
+    { id: "logs", label: "Daily logs", icon: FileClock },
+  ];
+  const lastMessages = useMemo(
+    () =>
+      events.filter(
+        (event, index, array) =>
+          event.type !== "assistant.message" ||
+          index === array.length - 1 ||
+          array[index + 1]?.body !== event.body,
+      ),
+    [events],
+  );
+  async function cancel() {
+    try {
+      await api.post(`/api/sessions/${session.uid}/cancel`);
+      await onRefresh();
+      toast.info("Session paused");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function submitReview(action: "continue" | "merge" = "merge") {
+    if (!diff) return;
+    setBusy(true);
+    try {
+      const comments = commentBody
+        ? [
+            {
+              path: commentPath || diff.files[0]?.path || "general",
+              line: commentLine ? Number(commentLine) : undefined,
+              body: commentBody,
+            },
+          ]
+        : [];
+      await api.post(`/api/sessions/${session.uid}/review`, {
+        decision: reviewMode,
+        action,
+        summary,
+        comments,
+        diffHash: diff.hash,
+      });
+      setReviewOpen(false);
+      setSummary("");
+      setCommentBody("");
+      await onRefresh();
+      await load();
+      toast.success(
+        reviewMode === "approve"
+          ? action === "continue"
+            ? "Review accepted; next queued task started"
+            : "Changes merged"
+          : "Feedback sent to the same OpenCode session",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+  async function openInCode() {
+    try {
+      await api.post(`/api/sessions/${session.uid}/open-vscode`);
+      toast.success("Opening this session worktree in VS Code");
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+  async function respondPermission(
+    event: NormalizedEvent,
+    response: "once" | "reject",
+  ) {
+    const nested = event.metadata.permission as { id?: string } | undefined;
+    const permissionId = String(
+      event.metadata.id || event.metadata.permissionID || nested?.id || "",
+    );
+    if (!permissionId)
+      return toast.error("OpenCode did not include a permission identifier");
+    try {
+      await api.post(
+        `/api/sessions/${session.uid}/permissions/${encodeURIComponent(permissionId)}`,
+        { response },
+      );
+      toast.success(
+        response === "once" ? "Permission allowed once" : "Permission rejected",
+      );
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
+  }
+  return (
+    <div className="flex h-screen min-h-0 flex-col bg-background">
+      <header className="flex h-14 shrink-0 items-center gap-3 border-b border-border bg-panel px-3">
+        <Button variant="ghost" size="icon" onClick={onBack}>
+          <ArrowLeft className="size-4" />
+        </Button>
+        <div className="min-w-0">
+          <div className="flex items-center gap-2">
+            <h1 className="truncate text-sm font-semibold">{session.name}</h1>
+            <span
+              className={cn(
+                "rounded-full px-2 py-0.5 font-mono text-[9px] uppercase",
+                session.status === "running"
+                  ? "bg-warning/15 text-warning"
+                  : session.status === "review"
+                    ? "bg-violet-500/15 text-violet-500"
+                    : "bg-panel-strong text-muted",
+              )}
+            >
+              {session.status}
+            </span>
+            {session.pendingTaskUids.length > 0 && (
+              <span className="rounded-full bg-panel-strong px-2 py-0.5 text-[9px] text-muted">
+                {session.pendingTaskUids.length} queued
+              </span>
+            )}
+          </div>
+          <p className="truncate font-mono text-[10px] text-muted">
+            {session.branch} · {session.providerId}/{session.modelId}
+          </p>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="secondary"
+            size="sm"
+            onClick={() => void openInCode()}
+          >
+            <Code2 className="size-3.5" /> Open in VS Code
+          </Button>
+          <Button variant="secondary" size="sm" onClick={() => void load()}>
+            <RefreshCw className="size-3.5" /> Refresh
+          </Button>
+          {session.status === "running" && (
+            <Button variant="danger" size="sm" onClick={() => void cancel()}>
+              <CircleStop className="size-3.5" /> Stop
+            </Button>
+          )}
+        </div>
+      </header>
+      <div className="flex h-11 shrink-0 items-center gap-1 border-b border-border bg-panel px-3">
+        {tabs.map((item) => {
+          const Icon = item.icon;
+          return (
+            <button
+              key={item.id}
+              onClick={() => setTab(item.id)}
+              className={cn(
+                "flex h-8 items-center gap-2 rounded-md px-3 text-xs text-muted transition hover:bg-panel-strong hover:text-foreground",
+                tab === item.id && "bg-panel-strong text-foreground",
+              )}
+            >
+              <Icon className="size-3.5" />
+              {item.label}
+            </button>
+          );
+        })}
+      </div>
+      <main className="min-h-0 flex-1 p-3">
+        {tab === "console" && (
+          <div className="grid h-full grid-cols-[minmax(0,1fr)_280px] gap-3 max-lg:grid-cols-1">
+            <section className="scrollbar-thin overflow-auto rounded-xl border border-border bg-elevated">
+              <div className="mx-auto max-w-3xl space-y-3 p-4">
+                {hasOlderEvents && (
+                  <div className="flex justify-center">
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      onClick={() => void loadOlderEvents()}
+                    >
+                      Load older messages
+                    </Button>
+                  </div>
+                )}
+                {!lastMessages.length && (
+                  <div className="grid min-h-72 place-items-center text-center">
+                    <div>
+                      <Bot className="mx-auto mb-3 size-8 text-muted" />
+                      <p className="text-sm font-medium">
+                        This session is ready
+                      </p>
+                      <p className="mt-1 text-xs text-muted">
+                        Queue a Ready task from the board to start OpenCode.
+                      </p>
+                    </div>
+                  </div>
+                )}
+                {lastMessages.map((event) => (
+                  <article
+                    key={event.uid}
+                    className={cn(
+                      "rounded-xl border p-3",
+                      event.type === "error"
+                        ? "border-danger/30 bg-danger/5"
+                        : event.type === "assistant.message"
+                          ? "border-border bg-panel"
+                          : "border-border/70 bg-background/50",
+                    )}
+                  >
+                    <div className="mb-2 flex items-center gap-2 text-[10px] uppercase tracking-wider text-muted">
+                      {event.type === "assistant.message" ? (
+                        <MessageSquareText className="size-3.5 text-accent" />
+                      ) : event.type === "error" ? (
+                        <XCircle className="size-3.5 text-danger" />
+                      ) : (
+                        <Code2 className="size-3.5" />
+                      )}
+                      <span>{event.title}</span>
+                      <time className="ml-auto font-mono normal-case">
+                        {new Date(event.createdAt).toLocaleTimeString()}
+                      </time>
+                    </div>
+                    {event.type === "assistant.message" ? (
+                      <div className="prose prose-sm max-w-none text-[13px] leading-6 dark:prose-invert">
+                        <ReactMarkdown>{event.body}</ReactMarkdown>
+                      </div>
+                    ) : (
+                      <pre className="whitespace-pre-wrap font-mono text-[11px] leading-5">
+                        {event.body}
+                      </pre>
+                    )}
+                    {event.type === "permission.request" && (
+                      <div className="mt-3 flex gap-2">
+                        <Button
+                          size="sm"
+                          onClick={() => void respondPermission(event, "once")}
+                        >
+                          <ShieldCheck className="size-3.5" /> Allow once
+                        </Button>
+                        <Button
+                          size="sm"
+                          variant="danger"
+                          onClick={() =>
+                            void respondPermission(event, "reject")
+                          }
+                        >
+                          Reject
+                        </Button>
+                      </div>
+                    )}
+                  </article>
+                ))}
+              </div>
+            </section>
+            <aside className="scrollbar-thin overflow-auto rounded-xl border border-border bg-panel p-3">
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted">
+                Session queue
+              </h2>
+              <div className="space-y-2">
+                {sessionTasks.map((task) => (
+                  <div
+                    key={task.uid}
+                    className="rounded-lg border border-border bg-elevated p-2.5"
+                  >
+                    <div className="flex gap-2">
+                      <span className="font-mono text-[9px] text-muted">
+                        KD-{task.number}
+                      </span>
+                      <span className="ml-auto rounded bg-panel-strong px-1.5 py-0.5 font-mono text-[8px] uppercase text-muted">
+                        {task.status}
+                      </span>
+                    </div>
+                    <p className="mt-1 text-xs font-medium">{task.title}</p>
+                  </div>
+                ))}
+                {!sessionTasks.length && (
+                  <p className="rounded-lg border border-dashed border-border p-4 text-center text-xs text-muted">
+                    No assigned tasks yet.
+                  </p>
+                )}
+              </div>
+            </aside>
+          </div>
+        )}
+        {tab === "changes" && (
+          <div className="flex h-full flex-col gap-3">
+            <div className="flex shrink-0 items-center justify-between">
+              <div>
+                <h2 className="text-sm font-semibold">
+                  Review workspace changes
+                </h2>
+                <p className="text-xs text-muted">
+                  Compare against {session.targetBranch}. Approval is
+                  invalidated when this hash changes.
+                </p>
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant="secondary"
+                  disabled={!diff?.diff}
+                  onClick={() => {
+                    setReviewMode("request_changes");
+                    setReviewOpen(true);
+                  }}
+                >
+                  <MessageSquareText className="size-4" /> Request changes
+                </Button>
+                <Button
+                  disabled={!diff?.diff || session.status !== "review"}
+                  onClick={() => {
+                    setReviewMode("approve");
+                    setReviewOpen(true);
+                  }}
+                >
+                  <Check className="size-4" />{" "}
+                  {session.pendingTaskUids.length
+                    ? "Review decision"
+                    : "Approve & merge"}
+                </Button>
+              </div>
+            </div>
+            <div className="min-h-0 flex-1">
+              {diff ? (
+                <DiffPanel data={diff} onLoadMore={() => void loadMoreDiff()} />
+              ) : (
+                <div className="grid h-full place-items-center">
+                  <Loader2 className="size-5 animate-spin text-muted" />
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        {tab === "terminal" && (
+          <TerminalPanel
+            api={api}
+            sessionUid={session.uid}
+            active={tab === "terminal"}
+          />
+        )}
+        {tab === "logs" && (
+          <div className="scrollbar-thin h-full overflow-auto rounded-xl border border-border bg-elevated p-4">
+            <div className="mx-auto max-w-3xl space-y-3">
+              {logs.map((log) => (
+                <article
+                  key={String(log.uid)}
+                  className="rounded-xl border border-border bg-panel p-4"
+                >
+                  <div className="mb-2 flex items-center gap-2">
+                    <FileClock className="size-4 text-accent" />
+                    <h3 className="text-sm font-semibold">
+                      {String(log.date)}
+                    </h3>
+                    <span className="ml-auto rounded bg-success/10 px-2 py-1 text-[9px] uppercase text-success">
+                      {String(log.status)}
+                    </span>
+                  </div>
+                  <p className="text-xs leading-5 text-muted">
+                    {String(log.result)}
+                  </p>
+                  <div className="mt-3 font-mono text-[10px] text-muted">
+                    {Array.isArray(log.changedFiles)
+                      ? log.changedFiles.join(" · ")
+                      : ""}
+                  </div>
+                </article>
+              ))}
+              {hasMoreLogs && (
+                <div className="flex justify-center">
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    onClick={() => void loadMoreLogs()}
+                  >
+                    Load more daily logs
+                  </Button>
+                </div>
+              )}
+              {!logs.length && (
+                <div className="grid min-h-72 place-items-center text-sm text-muted">
+                  Daily logs appear after a task completes.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </main>
+      <Dialog open={reviewOpen} onOpenChange={setReviewOpen}>
+        <DialogContent>
+          <DialogHeader>
+            <DialogTitle>
+              {reviewMode === "approve"
+                ? session.pendingTaskUids.length
+                  ? "Approve this review gate"
+                  : "Approve and merge"
+                : "Request changes"}
+            </DialogTitle>
+            <DialogDescription>
+              {reviewMode === "approve"
+                ? session.pendingTaskUids.length
+                  ? `You checked this result manually. Continue the remaining ${session.pendingTaskUids.length} task(s), or merge the current reviewed batch now.`
+                  : "This explicitly squash-merges the reviewed diff into the clean target branch, then resets only the managed session worktree."
+                : "Feedback is sent as a follow-up in the same OpenCode session."}
+            </DialogDescription>
+          </DialogHeader>
+          <div className="space-y-3">
+            <textarea
+              className="min-h-24 w-full rounded-lg border border-border bg-panel p-3 text-sm outline-none focus:border-accent"
+              value={summary}
+              onChange={(e) => setSummary(e.target.value)}
+              placeholder={
+                reviewMode === "approve"
+                  ? `Review ${session.name}`
+                  : "Describe what should change..."
+              }
+            />
+            {reviewMode === "request_changes" && (
+              <div className="grid grid-cols-[1fr_90px] gap-2">
+                <input
+                  className="rounded-lg border border-border bg-panel px-3 py-2 text-sm"
+                  value={commentPath}
+                  onChange={(e) => setCommentPath(e.target.value)}
+                  placeholder="File path (optional)"
+                />
+                <input
+                  className="rounded-lg border border-border bg-panel px-3 py-2 text-sm"
+                  value={commentLine}
+                  onChange={(e) => setCommentLine(e.target.value)}
+                  placeholder="Line"
+                />
+                <textarea
+                  className="col-span-2 min-h-20 rounded-lg border border-border bg-panel p-3 text-sm"
+                  value={commentBody}
+                  onChange={(e) => setCommentBody(e.target.value)}
+                  placeholder="Inline comment (optional)"
+                />
+              </div>
+            )}
+            <div className="flex flex-wrap justify-end gap-2">
+              <Button variant="ghost" onClick={() => setReviewOpen(false)}>
+                Cancel
+              </Button>
+              {reviewMode === "approve" &&
+                session.pendingTaskUids.length > 0 && (
+                  <Button
+                    variant="secondary"
+                    disabled={busy}
+                    onClick={() => void submitReview("continue")}
+                  >
+                    <Play className="size-4" /> Approve & continue queue
+                  </Button>
+                )}
+              <Button
+                variant={reviewMode === "approve" ? "default" : "secondary"}
+                disabled={
+                  busy ||
+                  (reviewMode === "request_changes" && !summary && !commentBody)
+                }
+                onClick={() => void submitReview("merge")}
+              >
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : reviewMode === "approve" ? (
+                  <Check className="size-4" />
+                ) : (
+                  <Play className="size-4" />
+                )}
+                {reviewMode === "approve"
+                  ? "Merge reviewed diff"
+                  : "Send feedback"}
+              </Button>
+            </div>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </div>
+  );
+}

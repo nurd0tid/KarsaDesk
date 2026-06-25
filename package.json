@@ -1,0 +1,33 @@
+{
+  "name": "karsadesk-local",
+  "version": "0.1.0",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "setup": "node scripts/setup-env.mjs",
+    "postinstall": "npm run build -w @vk/contracts",
+    "predev": "npm run setup && npm run build -w @vk/contracts",
+    "dev": "dotenv -e .env.local -- concurrently -k -n web,orchestrator -c cyan,magenta \"npm run dev -w @vk/web\" \"npm run dev -w @vk/orchestrator\"",
+    "build": "npm run build -w @vk/contracts && npm run build -w @vk/orchestrator && npm run build -w @vk/web",
+    "start": "dotenv -e .env.local -- concurrently -k -n web,orchestrator -c cyan,magenta \"npm run start -w @vk/web\" \"npm run start -w @vk/orchestrator\"",
+    "lint": "npm run lint -ws --if-present",
+    "typecheck": "npm run build -w @vk/contracts && npm run typecheck -ws --if-present",
+    "test": "npm run build -w @vk/contracts && npm run test -ws --if-present",
+    "test:e2e": "npm run test:e2e -w @vk/web",
+    "nocodb:setup": "dotenv -e .env.local -- npm run nocodb:setup -w @vk/orchestrator",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "concurrently": "^9.2.1",
+    "dotenv-cli": "^10.0.0",
+    "prettier": "^3.6.2",
+    "typescript": "^5.9.2"
+  },
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "dependencies": {}
+}
