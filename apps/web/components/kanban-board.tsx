@@ -23,10 +23,14 @@ import {
   Check,
   CircleDot,
   Clock3,
+  FileDiff,
+  GitCommit,
   GitBranch,
   GripVertical,
+  Hourglass,
   ListChecks,
   ShieldAlert,
+  TerminalSquare,
 } from "lucide-react";
 import type { Task } from "@vk/contracts";
 import { cn } from "@/lib/utils";
@@ -120,6 +124,45 @@ function TaskCard({
         : task.priority === "medium"
           ? "bg-blue-500"
           : "bg-slate-400";
+  const runLane =
+    task.status === "running"
+      ? {
+          icon: Clock3,
+          label: "Agent running",
+          text: "OpenCode is working in a managed session worktree",
+          className: "border-warning/30 bg-warning/10 text-warning",
+        }
+      : task.status === "waiting_approval"
+        ? {
+            icon: Hourglass,
+            label: "Waiting approval",
+            text: "Permission or manual gate needs your decision",
+            className: "border-warning/30 bg-warning/10 text-warning",
+          }
+        : task.status === "review"
+          ? {
+              icon: FileDiff,
+              label: "Diff ready",
+              text: "Open the session to inspect changes and review",
+              className:
+                "border-violet-500/30 bg-violet-500/10 text-violet-500",
+            }
+          : task.status === "done"
+            ? {
+                icon: GitCommit,
+                label: "Merged/checkpointed",
+                text: "Task has passed the review lifecycle",
+                className: "border-success/30 bg-success/10 text-success",
+              }
+            : task.status === "failed"
+              ? {
+                  icon: ShieldAlert,
+                  label: "Failed",
+                  text: "Review partial work and decide retry or discard",
+                  className: "border-danger/30 bg-danger/10 text-danger",
+                }
+              : null;
+  const RunLaneIcon = runLane?.icon;
   return (
     <article
       ref={setNodeRef}
@@ -174,14 +217,43 @@ function TaskCard({
           />
         </label>
       </div>
-      {task.status === "failed" && (
+      {!runLane && task.status === "failed" && (
         <div className="mt-2 flex items-center gap-1.5 rounded bg-danger/10 px-2 py-1 text-[10px] text-danger">
           <ShieldAlert className="size-3" /> Failed — review partial work
         </div>
       )}
-      {task.status === "running" && (
+      {!runLane && task.status === "running" && (
         <div className="mt-2 flex items-center gap-1.5 text-[10px] text-warning">
           <Clock3 className="size-3 pulse-soft" /> Agent is working
+        </div>
+      )}
+      {runLane && (
+        <div
+          className={cn(
+            "mt-2 rounded-lg border px-2 py-1.5 text-[10px]",
+            runLane.className,
+          )}
+        >
+          <div className="flex items-center gap-1.5 font-medium">
+            {RunLaneIcon && (
+              <RunLaneIcon
+                className={cn(
+                  "size-3",
+                  task.status === "running" && "pulse-soft",
+                )}
+              />
+            )}
+            {runLane.label}
+          </div>
+          <p className="mt-0.5 line-clamp-2 text-[9px] opacity-80">
+            {runLane.text}
+          </p>
+        </div>
+      )}
+      {task.assignedSessionUid && (
+        <div className="mt-2 flex items-center gap-1.5 rounded bg-panel-strong px-2 py-1 font-mono text-[9px] text-muted">
+          <TerminalSquare className="size-3" />
+          session {task.assignedSessionUid.slice(0, 8)}
         </div>
       )}
     </article>

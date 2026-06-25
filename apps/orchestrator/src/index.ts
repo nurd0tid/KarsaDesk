@@ -839,8 +839,50 @@ async function runBatch(sessionUid: string) {
     );
     const prompt = `${task.refinedPrompt}\n\nAcceptance criteria:\n${task.acceptanceCriteria.map((item) => `- ${item}`).join("\n") || "- Follow the task exactly."}\n\nVerification:\n${task.verification.map((item) => `- ${item}`).join("\n") || "- Run proportionate verification."}`;
     try {
+      publish(
+        sessionUid,
+        task.uid,
+        "tool.start",
+        "Preparing task prompt",
+        [
+          `Mode: ${task.mode}`,
+          `Acceptance criteria: ${task.acceptanceCriteria.length || 1}`,
+          `Verification steps: ${task.verification.length || 1}`,
+        ].join("\n"),
+        { stage: "prepare_prompt" },
+      );
+      publish(
+        sessionUid,
+        task.uid,
+        "tool.start",
+        "OpenCode agent running",
+        "Streaming normalized OpenCode events into the session console",
+        {
+          stage: "agent_running",
+          providerId: session.providerId,
+          modelId: session.modelId,
+        },
+      );
       const response = await openCode.send(session, task, prompt, (event) =>
         eventHub.publish(event),
+      );
+      publish(
+        sessionUid,
+        task.uid,
+        "tool.result",
+        "OpenCode response captured",
+        response.text
+          ? `${response.text.length} chars returned by the agent`
+          : "OpenCode completed without a text summary",
+        { stage: "agent_response" },
+      );
+      publish(
+        sessionUid,
+        task.uid,
+        "tool.start",
+        "Writing daily log and checkpoint",
+        "Capturing result, changed files, and creating a review checkpoint",
+        { stage: "checkpoint" },
       );
       await writeDailyLog(
         task.projectUid,
@@ -851,6 +893,14 @@ async function runBatch(sessionUid: string) {
       session = getSession(sessionUid)!;
       await checkpoint(session, task.number, task.title);
       updateTask(task.uid, { status: "review" });
+      publish(
+        sessionUid,
+        task.uid,
+        "tool.result",
+        "Checkpoint ready",
+        "Task result is ready for diff review",
+        { stage: "review_ready" },
+      );
       publish(
         sessionUid,
         task.uid,
