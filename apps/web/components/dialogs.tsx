@@ -46,6 +46,94 @@ type FilesystemBrowser = {
 
 type PickFolderResult = { path: string | null };
 
+type SmartPromptLog = {
+  id: string;
+  label: string;
+  detail: string;
+  status: "pending" | "running" | "done" | "warning" | "error";
+  at: string;
+};
+
+function formatElapsed(ms: number) {
+  const seconds = Math.max(0, Math.floor(ms / 1000));
+  const minutes = Math.floor(seconds / 60);
+  return `${String(minutes).padStart(2, "0")}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function SmartPromptThinkingConsole({
+  logs,
+  elapsed,
+  busy,
+}: {
+  logs: SmartPromptLog[];
+  elapsed: number;
+  busy: boolean;
+}) {
+  if (!logs.length) return null;
+  const active = logs.find((item) => item.status === "running");
+  return (
+    <section
+      className="overflow-hidden rounded-xl border border-border bg-[#080b10] text-[11px] text-slate-200 shadow-inner"
+      aria-live="polite"
+    >
+      <div className="flex items-center justify-between border-b border-white/10 px-3 py-2">
+        <span className="flex items-center gap-2 font-medium text-slate-100">
+          {busy ? (
+            <Loader2 className="size-3.5 animate-spin text-accent" />
+          ) : (
+            <TerminalSquare className="size-3.5 text-accent" />
+          )}
+          Agent thinking
+        </span>
+        <span className="font-mono text-[10px] text-slate-400">
+          {busy ? "running" : "idle"} · {formatElapsed(elapsed)}
+        </span>
+      </div>
+      <div className="scrollbar-thin max-h-40 space-y-1 overflow-auto p-3 font-mono">
+        {logs.map((item) => {
+          const tone =
+            item.status === "error"
+              ? "text-danger"
+              : item.status === "warning"
+                ? "text-warning"
+                : item.status === "done"
+                  ? "text-success"
+                  : item.status === "running"
+                    ? "text-accent"
+                    : "text-slate-500";
+          const prefix =
+            item.status === "done"
+              ? "✓"
+              : item.status === "running"
+                ? "…"
+                : item.status === "warning"
+                  ? "!"
+                  : item.status === "error"
+                    ? "×"
+                    : "·";
+          return (
+            <div key={item.id} className="grid grid-cols-[42px_18px_1fr] gap-2">
+              <span className="text-slate-500">{item.at}</span>
+              <span className={tone}>{prefix}</span>
+              <span>
+                <span className={tone}>{item.label}</span>
+                {item.detail && (
+                  <span className="text-slate-400"> — {item.detail}</span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+        {active && (
+          <div className="pt-1 text-slate-500">
+            Waiting for {active.label.toLowerCase()}…
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
 export function ProjectDialog({
   open,
   onOpenChange,
@@ -479,6 +567,11 @@ export function SmartPromptDialog({
   const [modelId, setModelId] = useState("");
   const [draft, setDraft] = useState<SmartPromptResult | null>(null);
   const [busy, setBusy] = useState(false);
+  const [thinkingLogs, setThinkingLogs] = useState<SmartPromptLog[]>([]);
+  const [thinkingStartedAt, setThinkingStartedAt] = useState<number | null>(
+    null,
+  );
+  const [thinkingElapsed, setThinkingElapsed] = useState(0);
   const provider = providers.find((item) => item.id === providerId) || null;
   useEffect(() => {
     if (!open || !initialPrompt) return;
@@ -486,24 +579,137 @@ export function SmartPromptDialog({
     onInitialPromptConsumed?.();
   }, [open, initialPrompt, onInitialPromptConsumed]);
   useEffect(() => {
+    if (open) return;
+    setDraft(null);
+    setThinkingLogs([]);
+    setThinkingStartedAt(null);
+    setThinkingElapsed(0);
+  }, [open]);
+  useEffect(() => {
     if (provider && !provider.models.some((model) => model.id === modelId))
       setModelId(provider.models[0]?.id || "");
     if (!provider) setModelId("");
   }, [provider, modelId]);
+  useEffect(() => {
+    if (!busy || !thinkingStartedAt) return;
+    const timer = window.setInterval(() => {
+      setThinkingElapsed(Date.now() - thinkingStartedAt);
+    }, 500);
+    return () => window.clearInterval(timer);
+  }, [busy, thinkingStartedAt]);
   async function generate() {
     if (!api || !project || roughPrompt.trim().length < 10) return;
+    const startedAt = Date.now();
+    const timestamp = () => formatElapsed(Date.now() - startedAt);
+    const remotePlan = Boolean(provider?.id && modelId);
+    setDraft(null);
     setBusy(true);
+    setThinkingStartedAt(startedAt);
+    setThinkingElapsed(0);
+    setThinkingLogs([
+      {
+        id: "prompt",
+        label: "Received prompt",
+        detail: `${roughPrompt.trim().length} chars`,
+        status: "done",
+        at: "00:00",
+      },
+      {
+        id: "context",
+        label: "Loaded project context",
+        detail: project.memoryFiles.length
+          ? `${project.memoryFiles.length} memory file(s): ${project.memoryFiles.slice(0, 3).join(", ")}${project.memoryFiles.length > 3 ? ", …" : ""}`
+          : "no memory files detected",
+        status: "done",
+        at: "00:00",
+      },
+      {
+        id: "provider",
+        label: remotePlan ? "Selected OpenCode provider" : "Selected planner",
+        detail: remotePlan
+          ? `${provider?.name || provider?.id} · ${modelId}`
+          : "Local fallback / instant",
+        status: remotePlan ? "done" : "warning",
+        at: "00:00",
+      },
+      {
+        id: "plan",
+        label: remotePlan
+          ? "OpenCode Plan agent running"
+          : "Local planner running",
+        detail: remotePlan
+          ? "waiting for normalized agent response"
+          : "building a reviewable task draft without remote AI",
+        status: "running",
+        at: "00:00",
+      },
+      {
+        id: "normalize",
+        label: "Normalize draft tasks",
+        detail: "waiting for planner output",
+        status: "pending",
+        at: "00:00",
+      },
+    ]);
     try {
-      setDraft(
-        await api.post<SmartPromptResult>(
-          `/api/projects/${project.uid}/smart-prompt`,
-          { roughPrompt, providerId: provider?.id, modelId },
+      const result = await api.post<SmartPromptResult>(
+        `/api/projects/${project.uid}/smart-prompt`,
+        {
+          roughPrompt,
+          providerId: provider?.id,
+          modelId: modelId || undefined,
+        },
+      );
+      const usedFallback = result.summary.toLowerCase().includes("fallback");
+      setDraft(result);
+      setThinkingLogs((items) =>
+        items.map((item) => {
+          if (item.id === "plan")
+            return {
+              ...item,
+              detail: usedFallback
+                ? "finished with local fallback"
+                : "agent response received",
+              status: usedFallback ? "warning" : "done",
+              at: timestamp(),
+            };
+          if (item.id === "normalize")
+            return {
+              ...item,
+              detail: `${result.tasks.length} editable task(s) ready for review`,
+              status: "done",
+              at: timestamp(),
+            };
+          return item;
+        }),
+      );
+      if (usedFallback)
+        toast.info("Smart Prompt used the local fallback planner");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      setThinkingLogs((items) =>
+        items.map((item) =>
+          item.id === "plan"
+            ? {
+                ...item,
+                detail: message,
+                status: "error",
+                at: timestamp(),
+              }
+            : item.id === "normalize"
+              ? {
+                  ...item,
+                  detail: "planner failed before producing a draft",
+                  status: "error",
+                  at: timestamp(),
+                }
+              : item,
         ),
       );
-    } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
+      setThinkingElapsed(Date.now() - startedAt);
     }
   }
   async function publish() {
@@ -608,6 +814,11 @@ export function SmartPromptDialog({
                 No connected OpenCode provider was detected.
               </p>
             )}
+            <SmartPromptThinkingConsole
+              logs={thinkingLogs}
+              elapsed={thinkingElapsed}
+              busy={busy}
+            />
             <div className="flex justify-end">
               <Button
                 disabled={roughPrompt.length < 10 || busy}
@@ -627,6 +838,11 @@ export function SmartPromptDialog({
             <div className="rounded-lg bg-panel p-3 text-sm text-muted">
               {draft.summary}
             </div>
+            <SmartPromptThinkingConsole
+              logs={thinkingLogs}
+              elapsed={thinkingElapsed}
+              busy={busy}
+            />
             <div className="scrollbar-thin max-h-[52vh] space-y-2 overflow-auto pr-1">
               {draft.tasks.map((task, index) => (
                 <div

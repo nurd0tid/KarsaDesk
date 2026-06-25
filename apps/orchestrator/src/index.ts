@@ -86,6 +86,11 @@ const app = Fastify({
   bodyLimit: 40 * 1024 * 1024,
 });
 
+const optionalNonEmptyString = z.preprocess(
+  (value) => (value === "" ? undefined : value),
+  z.string().min(1).optional(),
+);
+
 await app.register(cors, {
   origin(origin, callback) {
     if (!origin || config.allowedOrigins.includes(origin)) callback(null, true);
@@ -562,8 +567,8 @@ app.post("/api/projects/:projectUid/smart-prompt", async (request) => {
   const input = z
     .object({
       roughPrompt: z.string().min(10),
-      providerId: z.string().min(1).optional(),
-      modelId: z.string().min(1).optional(),
+      providerId: optionalNonEmptyString,
+      modelId: optionalNonEmptyString,
     })
     .parse(request.body);
   const project = getProject(projectUid);
