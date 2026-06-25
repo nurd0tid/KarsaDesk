@@ -3,17 +3,37 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 
-export async function runFile(file: string, args: string[], cwd?: string, allowFailure = false) {
+type RunFileOptions = {
+  timeoutMs?: number;
+  windowsHide?: boolean;
+};
+
+export async function runFile(
+  file: string,
+  args: string[],
+  cwd?: string,
+  allowFailure = false,
+  options: RunFileOptions = {},
+) {
   try {
     const result = await execFileAsync(file, args, {
       cwd,
-      windowsHide: true,
+      timeout: options.timeoutMs,
+      windowsHide: options.windowsHide ?? true,
       maxBuffer: 20 * 1024 * 1024,
       encoding: "utf8",
     });
-    return { stdout: result.stdout.trim(), stderr: result.stderr.trim(), exitCode: 0 };
+    return {
+      stdout: result.stdout.trim(),
+      stderr: result.stderr.trim(),
+      exitCode: 0,
+    };
   } catch (error) {
-    const value = error as Error & { stdout?: string; stderr?: string; code?: number };
+    const value = error as Error & {
+      stdout?: string;
+      stderr?: string;
+      code?: number;
+    };
     if (!allowFailure) {
       throw new Error((value.stderr || value.stdout || value.message).trim());
     }
@@ -25,6 +45,10 @@ export async function runFile(file: string, args: string[], cwd?: string, allowF
   }
 }
 
-export async function runGit(args: string[], cwd: string, allowFailure = false) {
+export async function runGit(
+  args: string[],
+  cwd: string,
+  allowFailure = false,
+) {
   return runFile("git", args, cwd, allowFailure);
 }

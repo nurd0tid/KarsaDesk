@@ -19,6 +19,44 @@ const memoryCandidates = [
   "package.json",
 ];
 
+async function realPathIfExists(candidate: string) {
+  if (!fs.existsSync(candidate)) return null;
+  return fs.promises.realpath(candidate);
+}
+
+async function findWorkspaceRoot() {
+  let current = await fs.promises.realpath(process.cwd());
+  for (let depth = 0; depth < 8; depth += 1) {
+    const packageJson = path.join(current, "package.json");
+    const gitDir = path.join(current, ".git");
+    if (fs.existsSync(packageJson) || fs.existsSync(gitDir)) {
+      if (fs.existsSync(gitDir)) return current;
+      try {
+        const content = JSON.parse(
+          await fs.promises.readFile(packageJson, "utf8"),
+        ) as { workspaces?: unknown };
+        if (content.workspaces) return current;
+      } catch {
+        // Keep walking if package.json is unreadable or not JSON.
+      }
+    }
+    const parent = path.dirname(current);
+    if (parent === current) return current;
+    current = parent;
+  }
+  return current;
+}
+
+async function defaultBrowseRoot() {
+  const documents = path.join(os.homedir(), "Documents");
+  const programmingWork = path.join(documents, "Programming", "Work");
+  return (
+    (await realPathIfExists(programmingWork)) ||
+    (await realPathIfExists(documents)) ||
+    os.homedir()
+  );
+}
+
 export async function inspectProject(
   inputPath: string,
   requestedName?: string,
@@ -286,11 +324,13 @@ export async function squashMerge(
 
 export async function listDirectories(inputPath?: string) {
   const current = await fs.promises.realpath(
-    path.resolve(inputPath || process.cwd()),
+    path.resolve(inputPath || (await defaultBrowseRoot())),
   );
   const entries = await fs.promises.readdir(current, { withFileTypes: true });
+  const workspaceRoot = await findWorkspaceRoot();
   const roots = [
-    { name: "Workspace", path: await fs.promises.realpath(process.cwd()) },
+    { name: "Projects", path: await defaultBrowseRoot() },
+    { name: "Workspace", path: workspaceRoot },
     { name: "Home", path: os.homedir() },
     { name: "Documents", path: path.join(os.homedir(), "Documents") },
     { name: "Desktop", path: path.join(os.homedir(), "Desktop") },
@@ -341,6 +381,7 @@ export async function pickFolderNative() {
       "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
       "$dialog.Description = 'Choose a project folder for KarsaDesk'",
       "$dialog.ShowNewFolderButton = $false",
+      "if ($dialog.PSObject.Properties.Name -contains 'AutoUpgradeEnabled') { $dialog.AutoUpgradeEnabled = $true }",
       "if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) { Write-Output $dialog.SelectedPath }",
     ].join("; ");
     const result = await runFile(
@@ -348,6 +389,7 @@ export async function pickFolderNative() {
       ["-NoProfile", "-Sta", "-ExecutionPolicy", "Bypass", "-Command", script],
       undefined,
       true,
+      { timeoutMs: 120_000, windowsHide: false },
     );
     return {
       path: result.exitCode === 0 && result.stdout ? result.stdout : null,
@@ -363,6 +405,7 @@ export async function pickFolderNative() {
       ],
       undefined,
       true,
+      { timeoutMs: 120_000 },
     );
     return {
       path: result.exitCode === 0 && result.stdout ? result.stdout : null,
@@ -378,6 +421,7 @@ export async function pickFolderNative() {
     ],
     undefined,
     true,
+    { timeoutMs: 120_000 },
   );
   if (zenity.exitCode === 0 && zenity.stdout) return { path: zenity.stdout };
 
@@ -386,6 +430,7 @@ export async function pickFolderNative() {
     ["--getexistingdirectory", os.homedir()],
     undefined,
     true,
+    { timeoutMs: 120_000 },
   );
   return {
     path: kdialog.exitCode === 0 && kdialog.stdout ? kdialog.stdout : null,

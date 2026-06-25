@@ -89,7 +89,7 @@ export function ProjectDialog({
       );
       if (!result.path) {
         toast.info(
-          "Folder picker cancelled. You can still browse below or paste a path.",
+          "System folder dialog was cancelled or unavailable. Use Folder tree or paste a path instead.",
         );
         return;
       }
@@ -102,8 +102,10 @@ export function ProjectDialog({
     }
   }
   useEffect(() => {
-    if (open && api && !browser) void browse();
-  }, [open, api, browser]);
+    if (!open) return;
+    setBrowser(null);
+    setPath("");
+  }, [open]);
 
   async function add() {
     if (!api || !path) return;
@@ -140,10 +142,11 @@ export function ProjectDialog({
         </DialogHeader>
         <div className="space-y-4">
           <div>
-            <label className={label}>
+            <label className={label} htmlFor="project-name">
               Project name <span className="font-normal">(optional)</span>
             </label>
             <input
+              id="project-name"
               className={field}
               value={name}
               onChange={(event) => setName(event.target.value)}
@@ -151,9 +154,12 @@ export function ProjectDialog({
             />
           </div>
           <div>
-            <label className={label}>Repository path</label>
+            <label className={label} htmlFor="repository-path">
+              Repository path
+            </label>
             <div className="flex gap-2">
               <input
+                id="repository-path"
                 className={field}
                 value={path}
                 placeholder="C:\Users\you\Documents\Programming\Work\my-app"
@@ -164,43 +170,40 @@ export function ProjectDialog({
               />
               <Button
                 variant="secondary"
+                onClick={() => void pickFolder()}
+                disabled={pickerBusy || adding}
+              >
+                {pickerBusy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <FolderOpen className="size-4" />
+                )}
+                Browse…
+              </Button>
+              <Button
+                variant="ghost"
                 onClick={() => void browse(path || undefined)}
                 disabled={browsing || adding}
               >
                 {browsing ? (
                   <Loader2 className="size-4 animate-spin" />
                 ) : (
-                  <FolderOpen className="size-4" />
+                  <Folder className="size-4" />
                 )}
-                Browse folders
+                Folder tree
               </Button>
               <Button
                 variant="ghost"
                 onClick={() => void browse(path)}
                 disabled={browsing || adding || !path.trim()}
               >
-                Go
+                Go to path
               </Button>
             </div>
             <p className="mt-2 text-xs leading-5 text-muted">
-              Browse membuka folder tree lokal di modal ini. Paste path lalu Go
-              untuk lompat langsung ke folder tertentu.
+              Browse membuka folder picker dari OS. Kalau dialog OS tidak muncul
+              di environment tertentu, pakai Folder tree sebagai fallback lokal.
             </p>
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              className="mt-2"
-              disabled={pickerBusy || adding}
-              onClick={() => void pickFolder()}
-            >
-              {pickerBusy ? (
-                <Loader2 className="size-3.5 animate-spin" />
-              ) : (
-                <FolderOpen className="size-3.5" />
-              )}
-              Try system folder dialog
-            </Button>
           </div>
 
           {browser && (
@@ -242,8 +245,8 @@ export function ProjectDialog({
           <div className="max-h-72 overflow-auto rounded-xl border border-border bg-panel p-2">
             {!browser && (
               <p className="p-3 text-sm text-muted">
-                Click Open to browse local folders through the loopback
-                orchestrator.
+                Click Browse… to open the system folder picker, or Folder tree
+                to browse local folders inside this modal.
               </p>
             )}
             {browser?.parent && (
