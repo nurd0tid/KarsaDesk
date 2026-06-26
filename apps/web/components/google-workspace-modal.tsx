@@ -147,13 +147,37 @@ export function GoogleWorkspaceModal({
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
-      if (event.data?.source === "karsadesk") {
+      if (
+        event.data?.source === "karsadesk" &&
+        event.data?.type === "provider-connected" &&
+        (!event.data.provider || event.data.provider === "google")
+      ) {
         void loadStatus();
         setTimeout(() => void loadFiles(""), 800);
       }
     }
+    function onStorage(event: StorageEvent) {
+      if (event.key !== "karsadesk-provider-connected" || !event.newValue)
+        return;
+      const payload = JSON.parse(event.newValue) as {
+        provider?: string;
+        status?: string;
+      };
+      if (payload.provider && payload.provider !== "google") return;
+      toast[payload.status === "error" ? "error" : "success"](
+        payload.status === "error"
+          ? "Google connection failed"
+          : "Google connected. Refreshing files...",
+      );
+      void loadStatus();
+      setTimeout(() => void loadFiles(""), 800);
+    }
     window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+    };
   }, [api]);
 
   async function connectGoogle() {
@@ -169,7 +193,7 @@ export function GoogleWorkspaceModal({
         toast.error(payload.message);
         return;
       }
-      window.open(payload.url, "_blank", "noopener,noreferrer");
+      window.open(payload.url, "_blank", "popup,width=980,height=760");
       toast.info("Login Google di tab baru, lalu balik ke KarsaDesk.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));

@@ -93,10 +93,22 @@ export function connectedProviderConfigStatus() {
   };
 }
 
-function oauthCallbackPage(title: string, message: string) {
+function oauthCallbackPage(
+  provider: Provider,
+  status: "success" | "error",
+  title: string,
+  message: string,
+) {
   const safeTitle = title.replace(/[<>&"]/g, "");
   const safeMessage = message.replace(/[<>&"]/g, "");
-  return `<!doctype html><html><head><title>${safeTitle}</title><meta name="viewport" content="width=device-width, initial-scale=1"/></head><body style="font-family:system-ui;padding:24px;line-height:1.5"><h1>${safeTitle}</h1><p>${safeMessage}</p><p>You can close this tab and return to KarsaDesk.</p><script>try{window.opener&&window.opener.postMessage({source:"karsadesk",type:"provider-connected"},"*")}catch(e){};</script></body></html>`;
+  const payload = JSON.stringify({
+    source: "karsadesk",
+    type: "provider-connected",
+    provider,
+    status,
+    at: Date.now(),
+  });
+  return `<!doctype html><html><head><title>${safeTitle}</title><meta name="viewport" content="width=device-width, initial-scale=1"/><meta http-equiv="refresh" content="1.2;url=/?connected=${provider}&status=${status}"/></head><body style="font-family:system-ui;padding:24px;line-height:1.5"><h1>${safeTitle}</h1><p>${safeMessage}</p><p>Redirecting back to KarsaDesk dashboard...</p><script>try{var payload=${payload};localStorage.setItem("karsadesk-provider-connected",JSON.stringify(payload));window.opener&&window.opener.postMessage(payload,location.origin);setTimeout(function(){location.replace("/?connected=${provider}&status=${status}")},700)}catch(e){setTimeout(function(){location.replace("/")},700)}</script></body></html>`;
 }
 
 function rememberState(provider: Provider) {
@@ -201,9 +213,16 @@ export async function handleGoogleCallback(query: {
   error?: string;
 }) {
   if (query.error)
-    return oauthCallbackPage("Google connection failed", query.error);
+    return oauthCallbackPage(
+      "google",
+      "error",
+      "Google connection failed",
+      query.error,
+    );
   if (!query.code || !query.state)
     return oauthCallbackPage(
+      "google",
+      "error",
       "Google connection failed",
       "Missing OAuth code/state.",
     );
@@ -242,6 +261,8 @@ export async function handleGoogleCallback(query: {
     updatedAt: now.toISOString(),
   });
   return oauthCallbackPage(
+    "google",
+    "success",
     "Google connected",
     "Google Workspace is connected to KarsaDesk.",
   );
@@ -253,9 +274,16 @@ export async function handleFigmaCallback(query: {
   error?: string;
 }) {
   if (query.error)
-    return oauthCallbackPage("Figma connection failed", query.error);
+    return oauthCallbackPage(
+      "figma",
+      "error",
+      "Figma connection failed",
+      query.error,
+    );
   if (!query.code || !query.state)
     return oauthCallbackPage(
+      "figma",
+      "error",
       "Figma connection failed",
       "Missing OAuth code/state.",
     );
@@ -280,6 +308,8 @@ export async function handleFigmaCallback(query: {
     connectedVia: "oauth",
   });
   return oauthCallbackPage(
+    "figma",
+    "success",
     "Figma connected",
     "Figma is connected to KarsaDesk.",
   );
@@ -399,13 +429,44 @@ async function apiJson<T>(
           response.status === 401 ? "token_expired" : "missing_permission",
       });
     throw new Error(
-      body?.error?.message ||
-        body?.message ||
-        body?.err ||
-        `${provider} API failed (${response.status})`,
+      normalizeProviderError(
+        provider,
+        response.status,
+        body?.error?.message || body?.message || body?.err,
+      ),
     );
   }
   return body as T;
+}
+
+function normalizeProviderError(
+  provider: Provider,
+  status: number,
+  message?: string,
+) {
+  const text = String(message || `${provider} API failed (${status})`);
+  if (
+    provider === "google" &&
+    /has not been used|disabled|accessNotConfigured/i.test(text)
+  ) {
+    return [
+      text,
+      "",
+      "Enable the required Google APIs for the OAuth project, then wait a few minutes and retry:",
+      "- Google Drive API",
+      "- Google Docs API",
+      "- Google Sheets API",
+      "- Google Slides API",
+    ].join("\n");
+  }
+  if (provider === "google" && /Invalid Value/i.test(text)) {
+    return [
+      "Google rejected the Drive request as Invalid Value.",
+      "KarsaDesk now uses a simpler Drive query; refresh and try again.",
+      `Original message: ${text}`,
+    ].join("\n");
+  }
+  return text;
 }
 
 function googleFileType(mimeType: string): FileType {
@@ -442,7 +503,11 @@ export async function listGoogleFiles(
   const token = await googleAccessToken();
   const filters = [
     "trashed = false",
-    `mimeType in ('${googleMime("docs")}','${googleMime("sheets")}','${googleMime("slides")}')`,
+    `(${[
+      `mimeType = '${googleMime("docs")}'`,
+      `mimeType = '${googleMime("sheets")}'`,
+      `mimeType = '${googleMime("slides")}'`,
+    ].join(" or ")})`,
   ];
   const trimmed = query.trim().replace(/'/g, "\\'");
   if (trimmed) filters.push(`name contains '${trimmed}'`);
@@ -770,8 +835,12 @@ export async function importGoogleWorkspaceFile(input: {
           response.status === 401 ? "token_expired" : "missing_permission",
       });
     throw new Error(
-      result.error?.message ||
-        `Google Drive upload failed (${response.status})`,
+      normalizeProviderError(
+        "google",
+        response.status,
+        result.error?.message ||
+          `Google Drive upload failed (${response.status})`,
+      ),
     );
   }
   return getGoogleFile(result.id);
@@ -793,7 +862,13 @@ export async function readGoogleFileText(file: ConnectedFile) {
         status:
           response.status === 401 ? "token_expired" : "missing_permission",
       });
-    throw new Error(`Google export failed (${response.status})`);
+    throw new Error(
+      normalizeProviderError(
+        "google",
+        response.status,
+        `Google export failed (${response.status})`,
+      ),
+    );
   }
   return (await response.text()).slice(0, 20_000);
 }

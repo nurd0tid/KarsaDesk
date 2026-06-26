@@ -74,6 +74,51 @@ export function FigmaLiveModal({
     if (open) void loadStatus();
   }, [open, api]);
 
+  useEffect(() => {
+    function refreshFromProviderEvent(value?: string | null) {
+      if (!value) return;
+      try {
+        const payload = JSON.parse(value) as {
+          provider?: string;
+          status?: string;
+        };
+        if (payload.provider && payload.provider !== "figma") return;
+        toast[payload.status === "error" ? "error" : "success"](
+          payload.status === "error"
+            ? "Figma connection failed"
+            : "Figma connected. Refreshing status...",
+        );
+        void loadStatus();
+      } catch {
+        // Ignore unrelated storage values.
+      }
+    }
+    function onMessage(event: MessageEvent) {
+      if (
+        event.data?.source === "karsadesk" &&
+        event.data?.type === "provider-connected" &&
+        (!event.data.provider || event.data.provider === "figma")
+      ) {
+        toast[event.data.status === "error" ? "error" : "success"](
+          event.data.status === "error"
+            ? "Figma connection failed"
+            : "Figma connected. Refreshing status...",
+        );
+        void loadStatus();
+      }
+    }
+    function onStorage(event: StorageEvent) {
+      if (event.key === "karsadesk-provider-connected")
+        refreshFromProviderEvent(event.newValue);
+    }
+    window.addEventListener("message", onMessage);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("message", onMessage);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [api]);
+
   async function connectOAuth() {
     if (!api) return;
     setBusy(true);
@@ -87,7 +132,7 @@ export function FigmaLiveModal({
         toast.error(payload.message);
         return;
       }
-      window.open(payload.url, "_blank", "noopener,noreferrer");
+      window.open(payload.url, "_blank", "popup,width=980,height=760");
       toast.info("Complete Figma login, then return to KarsaDesk.");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));

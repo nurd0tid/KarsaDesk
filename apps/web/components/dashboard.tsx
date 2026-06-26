@@ -224,6 +224,20 @@ export function Dashboard() {
     }
   }, [integration, defaultProviderId, defaultModelId]);
 
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const provider = params.get("connected");
+    const status = params.get("status");
+    if (!provider) return;
+    toast[status === "error" ? "error" : "success"](
+      status === "error"
+        ? `${provider} connection failed`
+        : `${provider} connected. Dashboard refreshed.`,
+    );
+    window.history.replaceState({}, "", window.location.pathname);
+    void refresh();
+  }, [refresh]);
+
   const visibleTasks = useMemo(() => tasks, [tasks]);
 
   async function patchTask(task: Task, values: Partial<Task>) {

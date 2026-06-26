@@ -21,6 +21,7 @@ type Runtime = {
   baseUrl: string;
   password: string;
   eventAbort: AbortController;
+  cancelPrompt?: (error: Error) => void;
 };
 type Emit = (event: NormalizedEvent) => void;
 
@@ -228,6 +229,7 @@ export class OpenCodeAdapter implements CliAdapter {
       baseUrl,
       password,
       eventAbort: new AbortController(),
+      cancelPrompt: undefined,
     };
   }
 
@@ -425,13 +427,23 @@ export class OpenCodeAdapter implements CliAdapter {
       updateSession(session.uid, { opencodeSessionId });
       session = { ...session, opencodeSessionId };
     }
-    const result = await runtime.client.session.prompt({
-      path: { id: opencodeSessionId },
-      body: {
-        agent: task?.mode || session.agentMode,
-        model: { providerID: session.providerId, modelID: session.modelId },
-        parts: [{ type: "text", text: prompt }],
-      },
+    let cancelPrompt: Runtime["cancelPrompt"];
+    const result = await Promise.race([
+      runtime.client.session.prompt({
+        path: { id: opencodeSessionId },
+        body: {
+          agent: task?.mode || session.agentMode,
+          model: { providerID: session.providerId, modelID: session.modelId },
+          parts: [{ type: "text", text: prompt }],
+        },
+      }),
+      new Promise<never>((_, reject) => {
+        cancelPrompt = reject;
+        runtime.cancelPrompt = reject;
+      }),
+    ]).finally(() => {
+      if (runtime.cancelPrompt === cancelPrompt)
+        runtime.cancelPrompt = undefined;
     });
     if (result.error || !result.data)
       throw new Error(
@@ -560,10 +572,14 @@ export class OpenCodeAdapter implements CliAdapter {
 
   async cancel(session: Session) {
     const runtime = this.runtimes.get(session.uid);
-    if (runtime && session.opencodeSessionId)
-      await runtime.client.session.abort({
-        path: { id: session.opencodeSessionId },
-      });
+    runtime?.cancelPrompt?.(new Error("OpenCode request cancelled by user."));
+    if (runtime && session.opencodeSessionId) {
+      await runtime.client.session
+        .abort({
+          path: { id: session.opencodeSessionId },
+        })
+        .catch(() => undefined);
+    }
   }
 
   async stop(sessionUid: string) {
