@@ -336,6 +336,7 @@ export function SessionWorkspace({
   const [commentLine, setCommentLine] = useState("");
   const [commentBody, setCommentBody] = useState("");
   const [busy, setBusy] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [manualConsoleTaskUid, setManualConsoleTaskUid] = useState<
     string | null
   >(null);
@@ -522,18 +523,32 @@ export function SessionWorkspace({
   async function deleteSession() {
     if (
       !window.confirm(
-        "Delete this local session/worktree? Tasks stay on the board, but this session console, local events, and managed worktree are removed.",
+        "Delete this session and every task assigned to it? The active agent will be stopped, Running/Review cards will be removed, and structured records will also be deleted from NocoDB. This cannot be undone.",
       )
     )
       return;
+    setDeleting(true);
     try {
-      if (session.status === "running") await cancel();
-      await api.delete(`/api/sessions/${session.uid}`);
-      toast.success("Session deleted");
+      const result = await api.delete<{
+        ok: boolean;
+        warnings?: string[];
+        deletedTasks?: number;
+      }>(`/api/sessions/${session.uid}?deleteTasks=true`);
+      toast.success(
+        session.status === "running"
+          ? `Running session stopped and deleted with ${result.deletedTasks || 0} task(s)`
+          : `Session deleted with ${result.deletedTasks || 0} task(s)`,
+      );
+      if (result.warnings?.length)
+        toast.warning(
+          `Session data was deleted, but cleanup reported: ${result.warnings[0]}`,
+        );
       onBack();
       await onRefresh();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setDeleting(false);
     }
   }
   async function submitReview(action: "continue" | "merge" = "merge") {
@@ -695,16 +710,28 @@ export function SessionWorkspace({
               <span className="hidden sm:inline">Stop</span>
             </Button>
           )}
-          {session.status !== "running" && (
-            <Button
-              variant="danger"
-              size="sm"
-              onClick={() => void deleteSession()}
-            >
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={deleting}
+            onClick={() => void deleteSession()}
+            title={
+              ["running", "starting"].includes(session.status)
+                ? "Stop the active agent and delete this session"
+                : "Delete this session and its local/remote records"
+            }
+          >
+            {deleting ? (
+              <Loader2 className="size-3.5 animate-spin" />
+            ) : (
               <XCircle className="size-3.5" />
-              <span className="hidden sm:inline">Delete</span>
-            </Button>
-          )}
+            )}
+            <span className="hidden sm:inline">
+              {["running", "starting"].includes(session.status)
+                ? "Stop & delete"
+                : "Delete"}
+            </span>
+          </Button>
         </div>
       </header>
       <div className="scrollbar-thin flex min-h-11 shrink-0 items-center gap-1 overflow-x-auto border-b border-border bg-panel px-3 py-1">

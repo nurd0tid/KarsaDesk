@@ -176,6 +176,27 @@ function enqueue(
     .run();
 }
 
+function enqueueDelete(tableName: string, entityUid: string) {
+  db.delete(schema.outbox)
+    .where(
+      and(
+        eq(schema.outbox.tableName, tableName),
+        eq(schema.outbox.entityUid, entityUid),
+      ),
+    )
+    .run();
+  db.insert(schema.outbox)
+    .values({
+      tableName,
+      entityUid,
+      operation: "delete",
+      payload: {},
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+    })
+    .run();
+}
+
 export function listProjects(): Project[] {
   return db
     .select()
@@ -317,16 +338,105 @@ export function updateSession(uid: string, values: Partial<Session>): Session {
   return session;
 }
 
-export function deleteSessionLocal(uid: string) {
+export function deleteSessionLocal(uid: string, deleteTasks = true) {
   const now = new Date().toISOString();
-  db.update(schema.tasks)
-    .set({ assignedSessionUid: null, updatedAt: now })
+  const assignedTasks = db
+    .select()
+    .from(schema.tasks)
     .where(eq(schema.tasks.assignedSessionUid, uid))
-    .run();
+    .all() as Task[];
+  for (const task of assignedTasks) {
+    if (deleteTasks) {
+      const files = db
+        .select({ uid: schema.connectedFiles.uid })
+        .from(schema.connectedFiles)
+        .where(eq(schema.connectedFiles.taskUid, task.uid))
+        .all();
+      const actions = db
+        .select({ uid: schema.aiFileActions.uid })
+        .from(schema.aiFileActions)
+        .where(eq(schema.aiFileActions.taskUid, task.uid))
+        .all();
+      const taskReviews = db
+        .select({ uid: schema.reviews.uid })
+        .from(schema.reviews)
+        .where(eq(schema.reviews.taskUid, task.uid))
+        .all();
+      const taskLogs = db
+        .select({ uid: schema.dailyLogs.uid })
+        .from(schema.dailyLogs)
+        .where(eq(schema.dailyLogs.taskUid, task.uid))
+        .all();
+      for (const file of files)
+        enqueueDelete("vk_task_connected_files", file.uid);
+      for (const action of actions)
+        enqueueDelete("vk_ai_file_actions", action.uid);
+      for (const review of taskReviews) enqueueDelete("vk_reviews", review.uid);
+      for (const log of taskLogs) enqueueDelete("vk_daily_logs", log.uid);
+      enqueueDelete("vk_tasks", task.uid);
+      db.delete(schema.aiFileActions)
+        .where(eq(schema.aiFileActions.taskUid, task.uid))
+        .run();
+      db.delete(schema.connectedFiles)
+        .where(eq(schema.connectedFiles.taskUid, task.uid))
+        .run();
+      db.delete(schema.reviews)
+        .where(eq(schema.reviews.taskUid, task.uid))
+        .run();
+      db.delete(schema.dailyLogs)
+        .where(eq(schema.dailyLogs.taskUid, task.uid))
+        .run();
+      db.delete(schema.tasks).where(eq(schema.tasks.uid, task.uid)).run();
+      const dependants = db.select().from(schema.tasks).all() as Task[];
+      for (const dependant of dependants) {
+        if (!dependant.dependencyUids.includes(task.uid)) continue;
+        updateTask(dependant.uid, {
+          dependencyUids: dependant.dependencyUids.filter(
+            (dependencyUid) => dependencyUid !== task.uid,
+          ),
+        });
+      }
+    } else {
+      const status = [
+        "running",
+        "waiting_approval",
+        "review",
+        "failed",
+        "cancelled",
+      ].includes(task.status)
+        ? "ready"
+        : task.status;
+      db.update(schema.tasks)
+        .set({ assignedSessionUid: null, status, updatedAt: now })
+        .where(eq(schema.tasks.uid, task.uid))
+        .run();
+      const updated = getTask(task.uid);
+      if (updated)
+        enqueue(
+          "vk_tasks",
+          updated.uid,
+          updated as unknown as Record<string, unknown>,
+        );
+    }
+  }
+  const reviews = db
+    .select({ uid: schema.reviews.uid })
+    .from(schema.reviews)
+    .where(eq(schema.reviews.sessionUid, uid))
+    .all();
+  const dailyLogs = db
+    .select({ uid: schema.dailyLogs.uid })
+    .from(schema.dailyLogs)
+    .where(eq(schema.dailyLogs.sessionUid, uid))
+    .all();
+  for (const review of reviews) enqueueDelete("vk_reviews", review.uid);
+  for (const log of dailyLogs) enqueueDelete("vk_daily_logs", log.uid);
+  enqueueDelete("vk_sessions", uid);
   db.delete(schema.events).where(eq(schema.events.sessionUid, uid)).run();
   db.delete(schema.reviews).where(eq(schema.reviews.sessionUid, uid)).run();
   db.delete(schema.dailyLogs).where(eq(schema.dailyLogs.sessionUid, uid)).run();
   db.delete(schema.sessions).where(eq(schema.sessions.uid, uid)).run();
+  return { deletedTasks: deleteTasks ? assignedTasks.length : 0 };
 }
 
 export function addEvent(event: NormalizedEvent) {
@@ -545,6 +655,14 @@ export function listAiFileActions(taskUid: string): AiFileAction[] {
     .where(eq(schema.aiFileActions.taskUid, taskUid))
     .orderBy(desc(schema.aiFileActions.createdAt))
     .all() as AiFileAction[];
+}
+
+export function getAiFileAction(uid: string): AiFileAction | undefined {
+  return db
+    .select()
+    .from(schema.aiFileActions)
+    .where(eq(schema.aiFileActions.uid, uid))
+    .get() as AiFileAction | undefined;
 }
 
 export function saveAiFileAction(value: AiFileAction) {

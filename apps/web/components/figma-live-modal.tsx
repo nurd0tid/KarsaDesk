@@ -8,6 +8,7 @@ import {
   Loader2,
   Palette,
   PlugZap,
+  RefreshCw,
   ShieldCheck,
 } from "lucide-react";
 import { toast } from "sonner";
@@ -50,6 +51,12 @@ function figmaFileKey(value: string) {
   }
 }
 
+function figmaEmbedUrl(value: string) {
+  return value
+    ? `https://www.figma.com/embed?embed_host=karsadesk&url=${encodeURIComponent(value)}`
+    : "";
+}
+
 export function FigmaLiveModal({
   open,
   onOpenChange,
@@ -68,8 +75,13 @@ export function FigmaLiveModal({
   const [fileUrl, setFileUrl] = useState("");
   const [prompt, setPrompt] = useState("");
   const [actionResult, setActionResult] = useState("");
+  const [previewRevision, setPreviewRevision] = useState(0);
+  const [actionStage, setActionStage] = useState<
+    "idle" | "reading" | "thinking" | "ready" | "failed"
+  >("idle");
   const [busy, setBusy] = useState(false);
   const fileKey = useMemo(() => figmaFileKey(fileUrl), [fileUrl]);
+  const embedUrl = useMemo(() => figmaEmbedUrl(fileUrl), [fileUrl]);
   const figma = accounts?.figma;
 
   async function loadStatus() {
@@ -184,6 +196,8 @@ export function FigmaLiveModal({
       return;
     }
     setBusy(true);
+    setActionStage("reading");
+    setActionResult("");
     try {
       const connected = await api.post<ConnectedFile>(
         `/api/tasks/${selectedTask.uid}/connected-files/from-provider`,
@@ -196,6 +210,7 @@ export function FigmaLiveModal({
         },
       );
       if (prompt.trim()) {
+        setActionStage("thinking");
         const action = await api.post<AiFileAction>(
           `/api/tasks/${selectedTask.uid}/ai-file-actions`,
           {
@@ -206,9 +221,17 @@ export function FigmaLiveModal({
           },
         );
         setActionResult(action.resultSummary || action.errorMessage || "");
+        setActionStage(action.status === "failed" ? "failed" : "ready");
+      } else {
+        setActionResult(
+          "Figma berhasil di-attach. Tulis instruksi agar AI membaca tree desain dan menyiapkan perubahan untuk direview.",
+        );
       }
+      if (!prompt.trim()) setActionStage("ready");
+      setPreviewRevision((value) => value + 1);
       toast.success(`Figma attached to KD-${selectedTask.number}`);
     } catch (error) {
+      setActionStage("failed");
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -217,7 +240,7 @@ export function FigmaLiveModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(860px,calc(100vw-24px))] overflow-auto">
+      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(1380px,calc(100vw-24px))] overflow-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <Palette className="size-5 text-accent" /> Figma Live
@@ -340,7 +363,45 @@ export function FigmaLiveModal({
                 >
                   <ExternalLink className="size-3.5" /> Open Figma
                 </Button>
+                <Button
+                  size="sm"
+                  variant="secondary"
+                  disabled={!embedUrl}
+                  onClick={() => setPreviewRevision((value) => value + 1)}
+                >
+                  <RefreshCw className="size-3.5" /> Refresh preview
+                </Button>
               </div>
+            </div>
+
+            <div className="overflow-hidden rounded-xl border border-border bg-background">
+              <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border bg-panel px-3 py-2">
+                <div>
+                  <p className="text-xs font-semibold">Figma canvas preview</p>
+                  <p className="text-[10px] text-muted">
+                    Canvas asli; login Figma di embed jika diminta
+                  </p>
+                </div>
+                {fileKey && (
+                  <span className="max-w-44 truncate rounded bg-panel-strong px-2 py-1 font-mono text-[9px] text-muted">
+                    {fileKey}
+                  </span>
+                )}
+              </div>
+              {embedUrl && fileKey ? (
+                <iframe
+                  key={`${fileKey}:${previewRevision}`}
+                  title="Figma canvas preview"
+                  src={embedUrl}
+                  className="h-[min(640px,64vh)] min-h-[440px] w-full bg-[#1e1e1e]"
+                  allow="clipboard-read; clipboard-write; fullscreen"
+                  referrerPolicy="strict-origin-when-cross-origin"
+                />
+              ) : (
+                <div className="grid min-h-[440px] place-items-center p-8 text-center text-sm text-muted">
+                  Paste URL file Figma untuk membuka canvas langsung di sini.
+                </div>
+              )}
             </div>
 
             <div className="rounded-xl border border-border bg-panel p-3">
@@ -357,13 +418,50 @@ export function FigmaLiveModal({
                 onChange={(event) => setPrompt(event.target.value)}
                 placeholder="Contoh: pahami flow design ini, buat review UX, susun perubahan untuk mobile, cek komponen yang perlu dirapikan..."
               />
+              <div
+                className="mt-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-elevated p-1 text-center text-[9px] uppercase tracking-wide"
+                aria-live="polite"
+              >
+                {[
+                  ["reading", "Read tree"],
+                  ["thinking", "AI review"],
+                  ["ready", "Result"],
+                ].map(([stage, label]) => {
+                  const order = ["idle", "reading", "thinking", "ready"];
+                  const active =
+                    actionStage !== "failed" &&
+                    order.indexOf(actionStage) >= order.indexOf(stage);
+                  return (
+                    <span
+                      key={stage}
+                      className={
+                        active
+                          ? "rounded bg-accent/10 px-1 py-1.5 text-accent"
+                          : actionStage === "failed" && stage === "reading"
+                            ? "rounded bg-danger/10 px-1 py-1.5 text-danger"
+                            : "rounded px-1 py-1.5 text-muted"
+                      }
+                    >
+                      {label}
+                    </span>
+                  );
+                })}
+              </div>
               <Button
                 className="mt-3 w-full"
                 disabled={!fileKey || !selectedTask || busy}
                 onClick={() => void attachAndAskFigma()}
               >
-                <PlugZap className="size-4" />
-                Attach to task & ask AI
+                {busy ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <PlugZap className="size-4" />
+                )}
+                {actionStage === "reading"
+                  ? "Reading Figma tree..."
+                  : actionStage === "thinking"
+                    ? "AI reviewing design..."
+                    : "Attach & prepare AI review"}
               </Button>
               {actionResult && (
                 <MarkdownViewer
@@ -389,8 +487,9 @@ export function FigmaLiveModal({
               </li>
             </ol>
             <div className="rounded-xl border border-success/30 bg-success/10 p-3 text-xs text-success">
-              Figma is active in KarsaDesk. Secrets stay local, and destructive
-              edits still go through task review/confirmation.
+              Canvas preview aktif di KarsaDesk. Figma REST membaca file/tree;
+              perubahan canvas tetap memerlukan review dan Figma Plugin bridge
+              sebelum bisa diterapkan otomatis.
             </div>
             <Button
               variant="secondary"

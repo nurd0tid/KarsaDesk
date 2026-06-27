@@ -792,6 +792,140 @@ export async function createGoogleWorkspaceFile(input: {
   return getGoogleFile(created.presentationId);
 }
 
+function revisionRows(content: string) {
+  return content
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean)
+    .map((line) => {
+      if (line.startsWith("|") && line.endsWith("|"))
+        return line
+          .slice(1, -1)
+          .split("|")
+          .map((cell) => cell.trim());
+      return [line.replace(/^#{1,6}\s+/, "")];
+    })
+    .filter(
+      (row) =>
+        !row.every((cell) => /^:?-{3,}:?$/.test(cell.replace(/\s/g, ""))),
+    );
+}
+
+export async function applyGoogleRevision(
+  file: ConnectedFile,
+  content: string,
+) {
+  if (file.provider !== "google")
+    throw new Error("Only Google workspace files support direct apply");
+  const token = await googleAccessToken();
+  const text = content.trim();
+  if (!text) throw new Error("The AI revision is empty");
+  const headers = {
+    Authorization: `Bearer ${token}`,
+    "Content-Type": "application/json",
+  };
+  if (file.fileType === "docs") {
+    const document = await apiJson<{
+      body?: { content?: Array<{ endIndex?: number }> };
+    }>(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(file.externalFileId)}`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      "google",
+    );
+    const endIndex = Math.max(
+      1,
+      (document.body?.content?.at(-1)?.endIndex || 2) - 1,
+    );
+    await apiJson<unknown>(
+      `https://docs.googleapis.com/v1/documents/${encodeURIComponent(file.externalFileId)}:batchUpdate`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          requests: [
+            {
+              insertText: {
+                location: { index: endIndex },
+                text: `\n${text}\n`,
+              },
+            },
+          ],
+        }),
+      },
+      "google",
+    );
+  } else if (file.fileType === "sheets") {
+    const spreadsheet = await apiJson<{
+      sheets?: Array<{ properties?: { title?: string } }>;
+    }>(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(file.externalFileId)}?fields=sheets.properties.title`,
+      { headers: { Authorization: `Bearer ${token}` } },
+      "google",
+    );
+    const sheetName = spreadsheet.sheets?.[0]?.properties?.title || "Sheet1";
+    await apiJson<unknown>(
+      `https://sheets.googleapis.com/v4/spreadsheets/${encodeURIComponent(file.externalFileId)}/values/${encodeURIComponent(`${sheetName}!A1`)}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ values: revisionRows(text) }),
+      },
+      "google",
+    );
+  } else if (file.fileType === "slides") {
+    const slideId = `kd_slide_${randomUUID().replaceAll("-", "_")}`;
+    const bodyBoxId = `kd_body_${randomUUID().replaceAll("-", "_")}`;
+    await apiJson<unknown>(
+      `https://slides.googleapis.com/v1/presentations/${encodeURIComponent(file.externalFileId)}:batchUpdate`,
+      {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          requests: [
+            {
+              createSlide: {
+                objectId: slideId,
+                slideLayoutReference: { predefinedLayout: "BLANK" },
+              },
+            },
+            {
+              createShape: {
+                objectId: bodyBoxId,
+                shapeType: "TEXT_BOX",
+                elementProperties: {
+                  pageObjectId: slideId,
+                  size: {
+                    width: { magnitude: 620, unit: "PT" },
+                    height: { magnitude: 360, unit: "PT" },
+                  },
+                  transform: {
+                    scaleX: 1,
+                    scaleY: 1,
+                    translateX: 48,
+                    translateY: 48,
+                    unit: "PT",
+                  },
+                },
+              },
+            },
+            {
+              insertText: {
+                objectId: bodyBoxId,
+                insertionIndex: 0,
+                text: text.slice(0, 8_000),
+              },
+            },
+          ],
+        }),
+      },
+      "google",
+    );
+  } else {
+    throw new Error(`Unsupported Google file type: ${file.fileType}`);
+  }
+  return getGoogleFile(file.externalFileId);
+}
+
 export async function importGoogleWorkspaceFile(input: {
   fileType: "docs" | "sheets" | "slides";
   name: string;
@@ -989,15 +1123,18 @@ export async function createAiFileActionWithContext(args: {
   prompt: string;
   actionType: string;
   applyMode: "preview" | "auto_apply";
+  context?: string;
+  aiDraft?: string;
+  aiError?: string;
 }) {
   const now = new Date().toISOString();
   let status: AiFileAction["status"] = "needs_confirmation";
   let resultSummary = "";
   let errorMessage: string | null = null;
   try {
-    const context = await readConnectedFileContext(args.file);
-    const contextPreview = context.trim()
-      ? context.trim().slice(0, 8_000)
+    const context = args.context ?? (await readConnectedFileContext(args.file));
+    const contextStatus = context.trim()
+      ? `${context.trim().length} characters were read locally and sent only to the selected AI provider for this request.`
       : "No readable text/context was returned by the provider API.";
     const risk =
       args.applyMode === "auto_apply"
@@ -1018,15 +1155,27 @@ export async function createAiFileActionWithContext(args: {
             "- Direct canvas mutation is reserved for the future Figma Plugin bridge.",
           ].join("\n");
     resultSummary = [
-      `AI file action prepared for ${args.file.fileName}.`,
-      `Instruction: ${args.prompt}`,
+      `# AI revision preview — ${args.file.fileName}`,
       "",
-      providerPlan,
+      `**Instruction:** ${args.prompt}`,
       "",
-      "Provider context preview:",
-      contextPreview,
+      args.aiDraft
+        ? ["## Proposed revision", "", args.aiDraft].join("\n")
+        : providerPlan,
+      ...(args.aiError
+        ? [
+            "",
+            "> AI provider did not produce a draft. The provider-safe plan below is shown instead.",
+            `> ${args.aiError}`,
+          ]
+        : []),
       "",
-      risk,
+      "## Apply safety",
+      "",
+      contextStatus,
+      "The raw provider file content is not copied into the NocoDB action log.",
+      "",
+      `> ${risk}`,
     ].join("\n");
   } catch (error) {
     status = "failed";

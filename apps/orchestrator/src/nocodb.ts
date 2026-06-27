@@ -281,6 +281,17 @@ export async function syncOutboxOnce() {
         `/api/v2/tables/${table.id}/records?where=${where}&limit=1`,
       );
       const record = (found?.list || [])[0];
+      if (item.operation === "delete") {
+        if (record?.Id) {
+          await request(`/api/v2/tables/${table.id}/records`, {
+            method: "DELETE",
+            body: JSON.stringify([{ Id: record.Id }]),
+          });
+        }
+        resolveOutbox(item.id);
+        processed += 1;
+        continue;
+      }
       const payload = serialize(item.payload);
       if (record?.Id) {
         await request(`/api/v2/tables/${table.id}/records`, {

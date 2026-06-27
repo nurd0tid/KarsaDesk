@@ -25,6 +25,7 @@ import {
   detachConnectedFile,
   deleteConnectedAccount,
   deleteSessionLocal,
+  getAiFileAction,
   getConnectedFile,
   getProject,
   getSession,
@@ -40,6 +41,7 @@ import {
   listTasks,
   nextTaskNumber,
   saveDailyLog,
+  saveAiFileAction,
   saveConnectedFile,
   saveProject,
   saveReview,
@@ -51,6 +53,7 @@ import {
 import {
   connectedProviderConfigStatus,
   connectFigmaPat,
+  applyGoogleRevision,
   createAiFileActionWithContext,
   createGoogleWorkspaceFile,
   figmaStartUrl,
@@ -553,14 +556,103 @@ app.post("/api/tasks/:taskUid/ai-file-actions", async (request, reply) => {
   const file = getConnectedFile(input.connectedFileUid);
   if (!file || file.taskUid !== taskUid)
     throw app.httpErrors.notFound("Connected file not found");
+  let context = "";
+  let aiError: string | undefined;
+  try {
+    context = await readConnectedFileContext(file);
+  } catch (error) {
+    aiError = error instanceof Error ? error.message : String(error);
+  }
+  const project = getProject(task.projectUid);
+  const aiSession = task.assignedSessionUid
+    ? getSession(task.assignedSessionUid)
+    : listSessions(task.projectUid)[0];
+  let aiDraft: string | undefined;
+  if (project && aiSession && context) {
+    try {
+      aiDraft = await openCode.brainstorm(
+        project.localPath,
+        aiSession.providerId,
+        aiSession.modelId,
+        [
+          "You are KarsaDesk's revision assistant for an external workspace file.",
+          file.provider === "google"
+            ? `Prepare concrete revised content for this Google ${file.fileType} file.`
+            : "Prepare a concrete Figma design revision specification using the current file tree.",
+          "Follow the user's instruction exactly. Preserve useful existing content and do not invent citations or facts.",
+          "Return the proposed revision itself, not a generic explanation. Use Markdown so the user can review it before any apply step.",
+          "",
+          `User instruction: ${input.prompt}`,
+          "",
+          "Current file context:",
+          context.slice(0, 14_000),
+        ].join("\n"),
+      );
+    } catch (error) {
+      aiError = error instanceof Error ? error.message : String(error);
+      app.log.warn(
+        { error: aiError, taskUid, fileUid: file.uid },
+        "External file AI draft fell back to provider-safe plan",
+      );
+    }
+  } else if (!aiError) {
+    aiError = "No project AI session is available for this task.";
+  }
   const action = await createAiFileActionWithContext({
     taskUid,
     file,
     prompt: input.prompt,
     actionType: input.actionType || "plan",
     applyMode: input.applyMode,
+    context,
+    aiDraft,
+    aiError,
   });
   return reply.code(201).send(action);
+});
+
+app.post("/api/ai-file-actions/:actionUid/apply", async (request) => {
+  const { actionUid } = z
+    .object({ actionUid: z.string().uuid() })
+    .parse(request.params);
+  z.object({ confirmed: z.literal(true) }).parse(request.body);
+  const action = getAiFileAction(actionUid);
+  if (!action) throw app.httpErrors.notFound("AI file action not found");
+  const file = getConnectedFile(action.connectedFileUid);
+  if (!file) throw app.httpErrors.notFound("Connected file not found");
+  if (file.provider !== "google")
+    throw app.httpErrors.badRequest(
+      "Figma canvas apply requires the Figma Plugin bridge",
+    );
+  const marker = "## Proposed revision";
+  const contextMarker = "## Apply safety";
+  const start = action.resultSummary.indexOf(marker);
+  const end = action.resultSummary.indexOf(contextMarker);
+  if (start < 0 || end <= start)
+    throw app.httpErrors.conflict(
+      "This action has no AI revision draft to apply",
+    );
+  const revision = action.resultSummary
+    .slice(start + marker.length, end)
+    .trim();
+  const providerFile = await applyGoogleRevision(file, revision);
+  const updatedAt = new Date().toISOString();
+  const updatedAction = {
+    ...action,
+    status: "success" as const,
+    resultSummary: `${action.resultSummary.trim()}\n\n> Applied to Google at ${updatedAt}.`,
+    errorMessage: null,
+    updatedAt,
+  };
+  saveAiFileAction(updatedAction);
+  const updatedFile = await syncConnectedFileMetadata({
+    ...file,
+    externalFileUrl: providerFile.externalFileUrl,
+    fileName: providerFile.fileName,
+    thumbnailUrl: providerFile.thumbnailUrl,
+    metadata: providerFile.metadata,
+  });
+  return { action: updatedAction, file: updatedFile };
 });
 
 app.get("/api/projects/:projectUid/opencode", async (request) => {
@@ -820,18 +912,38 @@ app.delete("/api/sessions/:sessionUid", async (request) => {
   const { sessionUid } = z
     .object({ sessionUid: z.string().uuid() })
     .parse(request.params);
+  const { deleteTasks } = z
+    .object({ deleteTasks: z.enum(["true", "false"]).default("true") })
+    .parse(request.query);
   const session = getSession(sessionUid);
   if (!session) throw app.httpErrors.notFound("Session not found");
-  if (["running", "starting"].includes(session.status))
-    await openCode.cancel(session);
-  await openCode.stop(sessionUid);
-  terminals.stop(sessionUid);
+  const warnings: string[] = [];
+  try {
+    if (["running", "starting"].includes(session.status))
+      await openCode.cancel(session);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : String(error));
+  }
+  try {
+    await openCode.stop(sessionUid);
+    terminals.stop(sessionUid);
+  } catch (error) {
+    warnings.push(error instanceof Error ? error.message : String(error));
+  }
   const project = getProject(session.projectUid);
-  if (!project) throw app.httpErrors.notFound("Project not found");
-  if (fs.existsSync(session.worktreePath))
-    await removeManagedWorktree(project, session);
-  deleteSessionLocal(sessionUid);
-  return { ok: true };
+  try {
+    if (project && fs.existsSync(session.worktreePath))
+      await removeManagedWorktree(project, session);
+  } catch (error) {
+    warnings.push(
+      `Managed worktree cleanup failed: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  }
+  const deleted = deleteSessionLocal(sessionUid, deleteTasks === "true");
+  void syncOutboxOnce().catch((error) =>
+    app.log.warn({ error }, "NocoDB session delete sync failed"),
+  );
+  return { ok: true, warnings, deletedTasks: deleted.deletedTasks };
 });
 
 app.get("/api/sessions/:sessionUid/events", async (request) => {
@@ -990,6 +1102,7 @@ async function runBatch(sessionUid: string) {
       const response = await openCode.send(session, task, prompt, (event) =>
         eventHub.publish(event),
       );
+      if (!getTask(task.uid) || !getSession(sessionUid)) return;
       publish(
         sessionUid,
         task.uid,
@@ -1052,6 +1165,7 @@ async function runBatch(sessionUid: string) {
         return;
       }
     } catch (error) {
+      if (!getTask(task.uid) || !getSession(sessionUid)) return;
       const message = error instanceof Error ? error.message : String(error);
       updateTask(task.uid, { status: "failed" });
       updateSession(sessionUid, { status: "paused", activeTaskUid: task.uid });
@@ -1065,6 +1179,7 @@ async function runBatch(sessionUid: string) {
       return;
     }
   }
+  if (!getSession(sessionUid)) return;
   updateSession(sessionUid, { status: "review", activeTaskUid: null });
   publish(
     sessionUid,

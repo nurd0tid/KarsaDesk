@@ -6,6 +6,7 @@ import {
   FileText,
   Loader2,
   Presentation,
+  RefreshCw,
   Search,
   Sheet,
   UploadCloud,
@@ -85,6 +86,15 @@ function statusTone(status: string) {
   return "border-danger/30 text-danger";
 }
 
+function googlePreviewUrl(file: ConnectedProviderFile) {
+  const id = encodeURIComponent(file.externalFileId);
+  if (file.fileType === "sheets")
+    return `https://docs.google.com/spreadsheets/d/${id}/preview`;
+  if (file.fileType === "slides")
+    return `https://docs.google.com/presentation/d/${id}/preview`;
+  return `https://docs.google.com/document/d/${id}/preview`;
+}
+
 async function toBase64(file: File) {
   const buffer = await file.arrayBuffer();
   let binary = "";
@@ -118,6 +128,11 @@ export function GoogleWorkspaceModal({
     useState<ConnectedProviderFile | null>(null);
   const [filePrompt, setFilePrompt] = useState("");
   const [fileActionResult, setFileActionResult] = useState("");
+  const [lastAction, setLastAction] = useState<AiFileAction | null>(null);
+  const [previewRevision, setPreviewRevision] = useState(0);
+  const [actionStage, setActionStage] = useState<
+    "idle" | "reading" | "thinking" | "ready" | "failed"
+  >("idle");
   const [busy, setBusy] = useState(false);
   const google = accounts?.google;
   const canReadDrive = Boolean(
@@ -158,6 +173,13 @@ export function GoogleWorkspaceModal({
   useEffect(() => {
     if (open && google?.connected) void loadFiles("");
   }, [open, google?.connected, kind]);
+
+  useEffect(() => {
+    setPreviewRevision((value) => value + 1);
+    setFileActionResult("");
+    setLastAction(null);
+    setActionStage("idle");
+  }, [selectedFile?.externalFileId]);
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -290,6 +312,8 @@ export function GoogleWorkspaceModal({
       return;
     }
     setBusy(true);
+    setActionStage("reading");
+    setFileActionResult("");
     try {
       const connected = await api.post<ConnectedFile>(
         `/api/tasks/${selectedTask.uid}/connected-files/from-provider`,
@@ -302,6 +326,7 @@ export function GoogleWorkspaceModal({
         },
       );
       if (filePrompt.trim()) {
+        setActionStage("thinking");
         const action = await api.post<AiFileAction>(
           `/api/tasks/${selectedTask.uid}/ai-file-actions`,
           {
@@ -311,10 +336,49 @@ export function GoogleWorkspaceModal({
             applyMode: "preview",
           },
         );
+        setLastAction(action);
         setFileActionResult(action.resultSummary || action.errorMessage || "");
+        setActionStage(action.status === "failed" ? "failed" : "ready");
+      } else {
+        setFileActionResult(
+          "File berhasil di-attach. Tulis instruksi agar AI menyiapkan revisi yang bisa direview.",
+        );
       }
+      if (!filePrompt.trim()) setActionStage("ready");
+      setPreviewRevision((value) => value + 1);
       toast.success(`Attached to KD-${selectedTask.number}`);
     } catch (error) {
+      setActionStage("failed");
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function applyGoogleRevision() {
+    if (!api || !lastAction || !selectedFile) return;
+    const behavior =
+      selectedFile.fileType === "docs"
+        ? "append the approved revision to the document"
+        : selectedFile.fileType === "sheets"
+          ? "append the approved rows to the first sheet"
+          : "add a new slide containing the approved revision";
+    if (!window.confirm(`KarsaDesk will ${behavior}. Continue?`)) return;
+    setBusy(true);
+    setActionStage("thinking");
+    try {
+      const result = await api.post<{ action: AiFileAction }>(
+        `/api/ai-file-actions/${lastAction.uid}/apply`,
+        { confirmed: true },
+      );
+      setLastAction(result.action);
+      setFileActionResult(result.action.resultSummary);
+      setActionStage("ready");
+      setPreviewRevision((value) => value + 1);
+      window.setTimeout(() => setPreviewRevision((value) => value + 1), 1200);
+      toast.success("Approved AI revision applied to Google");
+    } catch (error) {
+      setActionStage("failed");
       toast.error(error instanceof Error ? error.message : String(error));
     } finally {
       setBusy(false);
@@ -325,7 +389,7 @@ export function GoogleWorkspaceModal({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(1120px,calc(100vw-24px))] overflow-auto">
+      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(1480px,calc(100vw-24px))] overflow-auto">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
             <ActiveIcon className="size-5 text-accent" /> Google Workspace
@@ -512,7 +576,7 @@ export function GoogleWorkspaceModal({
               </MarkdownViewer>
             )}
 
-            <div className="grid min-h-0 flex-1 gap-3 lg:grid-cols-[minmax(0,1fr)_320px]">
+            <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[280px_minmax(420px,1fr)_320px]">
               <div className="scrollbar-thin min-h-0 space-y-2 overflow-auto">
                 {!google?.connected && (
                   <div className="grid h-full place-items-center rounded-xl border border-dashed border-border p-8 text-center">
@@ -571,6 +635,41 @@ export function GoogleWorkspaceModal({
                   );
                 })}
               </div>
+              <section className="min-h-[420px] overflow-hidden rounded-xl border border-border bg-background">
+                <div className="flex min-h-11 items-center justify-between gap-2 border-b border-border bg-elevated px-3 py-2">
+                  <div className="min-w-0">
+                    <p className="truncate text-xs font-semibold">
+                      {selectedFile?.fileName || "Google file preview"}
+                    </p>
+                    <p className="text-[10px] text-muted">
+                      Live preview dari file yang sedang dipilih
+                    </p>
+                  </div>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    disabled={!selectedFile}
+                    onClick={() => setPreviewRevision((value) => value + 1)}
+                  >
+                    <RefreshCw className="size-3.5" /> Refresh
+                  </Button>
+                </div>
+                {selectedFile ? (
+                  <iframe
+                    key={`${selectedFile.externalFileId}:${previewRevision}`}
+                    title={`${selectedFile.fileName} preview`}
+                    src={googlePreviewUrl(selectedFile)}
+                    className="h-[min(620px,62vh)] min-h-[420px] w-full bg-white"
+                    allow="clipboard-read; clipboard-write; fullscreen"
+                    referrerPolicy="strict-origin-when-cross-origin"
+                  />
+                ) : (
+                  <div className="grid min-h-[420px] place-items-center p-8 text-center text-sm text-muted">
+                    Pilih file di sebelah kiri untuk membuka preview Docs,
+                    Sheets, atau Slides langsung di KarsaDesk.
+                  </div>
+                )}
+              </section>
               <aside className="min-h-0 rounded-xl border border-border bg-elevated p-3">
                 <p className="text-xs font-semibold">Selected file</p>
                 {selectedFile ? (
@@ -592,13 +691,50 @@ export function GoogleWorkspaceModal({
                       onChange={(event) => setFilePrompt(event.target.value)}
                       placeholder="Prompt untuk file ini. Contoh: ringkas dokumen, buat outline revisi, cek tabel, susun slide..."
                     />
+                    <div
+                      className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-panel p-1 text-center text-[9px] uppercase tracking-wide"
+                      aria-live="polite"
+                    >
+                      {[
+                        ["reading", "Read file"],
+                        ["thinking", "AI draft"],
+                        ["ready", "Review"],
+                      ].map(([stage, label]) => {
+                        const order = ["idle", "reading", "thinking", "ready"];
+                        const active =
+                          actionStage !== "failed" &&
+                          order.indexOf(actionStage) >= order.indexOf(stage);
+                        return (
+                          <span
+                            key={stage}
+                            className={cn(
+                              "rounded px-1 py-1.5 text-muted",
+                              active && "bg-accent/10 text-accent",
+                              actionStage === "failed" &&
+                                stage === "reading" &&
+                                "bg-danger/10 text-danger",
+                            )}
+                          >
+                            {label}
+                          </span>
+                        );
+                      })}
+                    </div>
                     <Button
                       className="w-full"
                       disabled={busy || !selectedTask}
                       onClick={() => void attachAndAskSelectedFile()}
                     >
-                      <Wand2 className="size-4" />
-                      Attach & ask AI
+                      {busy ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Wand2 className="size-4" />
+                      )}
+                      {actionStage === "reading"
+                        ? "Reading file..."
+                        : actionStage === "thinking"
+                          ? "AI preparing revision..."
+                          : "Attach & prepare AI revision"}
                     </Button>
                     <Button
                       className="w-full"
@@ -616,6 +752,27 @@ export function GoogleWorkspaceModal({
                       >
                         {fileActionResult}
                       </MarkdownViewer>
+                    )}
+                    {lastAction?.status === "needs_confirmation" && (
+                      <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
+                        <p className="text-[11px] leading-5 text-warning">
+                          Review proposal di atas. Apply tidak mengganti isi
+                          lama: Docs ditambahkan di akhir, Sheets menambahkan
+                          rows, dan Slides membuat slide baru.
+                        </p>
+                        <Button
+                          className="mt-2 w-full"
+                          disabled={busy}
+                          onClick={() => void applyGoogleRevision()}
+                        >
+                          {busy ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <Wand2 className="size-4" />
+                          )}
+                          Apply approved revision to Google
+                        </Button>
+                      </div>
                     )}
                   </div>
                 ) : (
