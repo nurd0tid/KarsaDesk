@@ -18,8 +18,8 @@ UI berjalan di `http://127.0.0.1:3456`. Orchestrator lokal berjalan di `http://1
   - tombol Open ke editor asli Google/Figma;
   - AI Assistant per connected file dengan preview/action history;
   - action history per task.
-- Google Workspace modal adalah login-first: lihat file Drive, buat Docs/Sheets/Slides dari prompt, atau import file lokal ke Google Drive.
-- Figma Live modal: connect OAuth/PAT, validasi/open Figma URL, copy file key, lalu attach ke task untuk AI context/action history.
+- Google Workspace adalah halaman kerja penuh: refresh/pilih file Drive, preview Docs/Sheets/Slides, prompt AI, review, lalu explicit apply non-destruktif.
+- Figma Workspace adalah halaman kerja penuh: connect OAuth/PAT, buka canvas embed, pilih provider/model, lalu gunakan preset atau prompt bebas untuk menyusun screen/flow baru.
 
 ## Prasyarat
 
@@ -240,8 +240,11 @@ Workflow header **Figma**:
    - `https://www.figma.com/file/<fileKey>/...`
    - `https://www.figma.com/proto/<fileKey>/...`
 4. KarsaDesk membaca file key dari URL.
-5. Klik **Open Figma** untuk membuka file asli.
-6. Copy file key jika perlu.
+5. Canvas langsung tampil di halaman KarsaDesk.
+6. Pilih provider/model OpenCode di header.
+7. Pilih preset **Register**, **OTP verification**, **Forgot password**, atau **Complete auth flow**, atau tulis prompt sendiri.
+8. Pilih task existing atau biarkan `Auto-create task` membuat task desain baru.
+9. Klik **Generate design specification** untuk membaca tree Figma dan menghasilkan proposal frame, component, state, responsive behavior, dan prototype connection.
 
 Workflow per task:
 
@@ -270,15 +273,18 @@ Yang tetap dijaga:
 - KarsaDesk tidak auto-publish perubahan desain destruktif tanpa review.
 - Jika nanti ada Figma plugin bridge/apply adapter, apply tetap harus lewat permission/confirmation.
 
-## Google Workspace modal
+## Google Workspace page
 
 Klik **Google Docs** di header untuk workflow dokumen utama. KarsaDesk tidak lagi menjadikan local upload sebagai mode utama:
 
 1. Login Google.
-2. Lihat/search Google Docs, Sheets, dan Slides asli dari Drive.
-3. Buat file baru dari prompt langsung di Google Docs/Sheets/Slides.
-4. Jika punya file lokal `.docx/.xlsx/.pptx`, gunakan **Import file to Google** supaya file dikirim ke Google Drive dan dikonversi menjadi file Google asli.
-5. Buka file di editor Google asli, lalu hubungkan ke task jika ingin AI action history/review.
+2. Gunakan **Refresh files** untuk mengambil ulang daftar Drive.
+3. Klik kartu file; preview Docs/Sheets/Slides langsung tampil di tengah halaman.
+4. Pilih provider/model OpenCode di header.
+5. Tulis instruksi di panel kanan. Pilih task existing atau biarkan `Auto-create task` membuat task baru.
+6. Klik **Attach & prepare AI revision**, review proposal, lalu klik **Apply approved revision to Google**.
+7. Apply aman bersifat non-destruktif: Docs append content, Sheets append rows, dan Slides menambah slide.
+8. Jika punya file lokal `.docx/.xlsx/.pptx`, gunakan **Import file to Google** supaya file dikirim dan dikonversi menjadi file Google asli.
 
 ## Connected Files action behavior
 
@@ -287,7 +293,8 @@ Connected file AI action saat ini bersifat supervised:
 - membaca metadata/context file;
 - membuat preview/action history;
 - mengaitkan hasil ke task;
-- tidak menulis destruktif ke Google/Figma tanpa confirmation/apply adapter.
+- Google hanya ditulis setelah explicit confirmation; apply tidak menghapus konten lama.
+- Figma REST hanya membaca metadata/tree. Pembuatan node canvas otomatis memerlukan Figma Plugin bridge.
 
 Ini sengaja dibuat begitu supaya file kuliah, Google Workspace, dan Figma user tidak rusak oleh auto-apply.
 
@@ -333,4 +340,4 @@ npm run nocodb:setup
 - **Figma PAT gagal:** cek token masih aktif dan punya akses ke file yang ditempel.
 - **Figma file tidak terbaca:** pastikan URL mengandung `/design/<fileKey>/`, `/file/<fileKey>/`, `/proto/<fileKey>/`, atau `/board/<fileKey>/`, dan akun/token punya permission ke file.
 - **AI chat `insufficient balance` / `invalid api key`:** itu error provider OpenCode. Cek billing/credit/API key provider di OpenCode, lalu refresh provider/model.
-- **AI file action butuh confirmation:** ini normal; KarsaDesk membaca konteks dan menyiapkan preview, tidak menulis ke file asli tanpa apply adapter/konfirmasi.
+- **AI file action butuh confirmation:** ini normal. Google revision dapat diterapkan setelah explicit confirmation; Figma canvas mutation masih memerlukan Plugin bridge.

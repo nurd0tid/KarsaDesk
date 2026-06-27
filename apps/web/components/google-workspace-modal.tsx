@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import {
+  ArrowLeft,
   ExternalLink,
   FileText,
   Loader2,
@@ -18,18 +19,13 @@ import type {
   ConnectedAccountPublic,
   ConnectedFile,
   ConnectedProviderFile,
+  Project,
+  Provider,
   Task,
 } from "@vk/contracts";
 import type { ApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { MarkdownViewer } from "@/components/markdown-viewer";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 import { cn } from "@/lib/utils";
 
 type WorkspaceKind = "docs" | "sheets" | "slides";
@@ -108,12 +104,26 @@ export function GoogleWorkspaceModal({
   open,
   onOpenChange,
   api,
+  project,
+  tasks,
   selectedTask,
+  providers,
+  initialProviderId,
+  initialModelId,
+  onSelectTask,
+  onTaskCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   api: ApiClient | null;
+  project: Project | null;
+  tasks: Task[];
   selectedTask: Task | null;
+  providers: Provider[];
+  initialProviderId: string;
+  initialModelId: string;
+  onSelectTask: (task: Task | null) => void;
+  onTaskCreated: (task: Task) => void;
 }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
   const [accounts, setAccounts] = useState<AccountPayload | null>(null);
@@ -134,7 +144,13 @@ export function GoogleWorkspaceModal({
     "idle" | "reading" | "thinking" | "ready" | "failed"
   >("idle");
   const [busy, setBusy] = useState(false);
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelId, setModelId] = useState(initialModelId);
   const google = accounts?.google;
+  const selectedProvider =
+    providers.find((provider) => provider.id === providerId) ||
+    providers[0] ||
+    null;
   const canReadDrive = Boolean(
     google?.scopes.some((scope) => scope.includes("/auth/drive.readonly")),
   );
@@ -156,7 +172,14 @@ export function GoogleWorkspaceModal({
         `/api/connect/google/files?q=${encodeURIComponent(nextQuery)}&type=${kind}`,
       );
       setFiles(payload.files);
-      setSelectedFile((current) => current || payload.files[0] || null);
+      setSelectedFile(
+        (current) =>
+          payload.files.find(
+            (file) => file.externalFileId === current?.externalFileId,
+          ) ||
+          payload.files[0] ||
+          null,
+      );
       if (!payload.files.length) toast.info("No Google files found");
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
@@ -180,6 +203,15 @@ export function GoogleWorkspaceModal({
     setLastAction(null);
     setActionStage("idle");
   }, [selectedFile?.externalFileId]);
+
+  useEffect(() => {
+    if (selectedProvider && !providerId) setProviderId(selectedProvider.id);
+    if (
+      selectedProvider &&
+      !selectedProvider.models.some((model) => model.id === modelId)
+    )
+      setModelId(selectedProvider.models[0]?.id || "");
+  }, [modelId, providerId, selectedProvider]);
 
   useEffect(() => {
     function onMessage(event: MessageEvent) {
@@ -305,18 +337,50 @@ export function GoogleWorkspaceModal({
     }
   }
 
+  async function ensureTargetTask() {
+    if (selectedTask) return selectedTask;
+    if (!api || !project || !selectedFile || !filePrompt.trim()) return null;
+    const task = await api.post<Task>(`/api/projects/${project.uid}/tasks`, {
+      title: `${kindMeta[kind].label}: ${selectedFile.fileName}`,
+      roughPrompt: filePrompt.trim(),
+      refinedPrompt: [
+        `# ${kindMeta[kind].label} workspace task`,
+        "",
+        `File: ${selectedFile.fileName}`,
+        "",
+        filePrompt.trim(),
+      ].join("\n"),
+      mode: "build",
+      priority: "medium",
+      acceptanceCriteria: [
+        "AI revision is reviewed before it is applied to Google.",
+        "Existing file content is preserved by the non-destructive apply mode.",
+      ],
+      verification: ["Refresh the embedded Google preview after apply."],
+      dependencyUids: [],
+      source: "manual",
+    });
+    onTaskCreated(task);
+    return task;
+  }
+
   async function attachAndAskSelectedFile() {
     if (!api || !selectedFile) return;
-    if (!selectedTask) {
-      toast.error("Pilih task dulu di board, baru attach file ke task itu.");
+    if (!filePrompt.trim()) {
+      toast.error("Tulis instruksi untuk file ini terlebih dahulu.");
       return;
     }
     setBusy(true);
     setActionStage("reading");
     setFileActionResult("");
     try {
+      const targetTask = await ensureTargetTask();
+      if (!targetTask)
+        throw new Error(
+          "Pilih project atau task terlebih dahulu agar pekerjaan bisa dilacak.",
+        );
       const connected = await api.post<ConnectedFile>(
-        `/api/tasks/${selectedTask.uid}/connected-files/from-provider`,
+        `/api/tasks/${targetTask.uid}/connected-files/from-provider`,
         {
           provider: selectedFile.provider,
           externalFileId: selectedFile.externalFileId,
@@ -328,12 +392,14 @@ export function GoogleWorkspaceModal({
       if (filePrompt.trim()) {
         setActionStage("thinking");
         const action = await api.post<AiFileAction>(
-          `/api/tasks/${selectedTask.uid}/ai-file-actions`,
+          `/api/tasks/${targetTask.uid}/ai-file-actions`,
           {
             connectedFileUid: connected.uid,
             prompt: filePrompt.trim(),
             actionType: "plan",
             applyMode: "preview",
+            providerId: selectedProvider?.id,
+            modelId: modelId || undefined,
           },
         );
         setLastAction(action);
@@ -346,7 +412,7 @@ export function GoogleWorkspaceModal({
       }
       if (!filePrompt.trim()) setActionStage("ready");
       setPreviewRevision((value) => value + 1);
-      toast.success(`Attached to KD-${selectedTask.number}`);
+      toast.success(`AI revision prepared in KD-${targetTask.number}`);
     } catch (error) {
       setActionStage("failed");
       toast.error(error instanceof Error ? error.message : String(error));
@@ -388,19 +454,61 @@ export function GoogleWorkspaceModal({
   const ActiveIcon = kindMeta[kind].icon;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(1480px,calc(100vw-24px))] overflow-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <ActiveIcon className="size-5 text-accent" /> Google Workspace
-          </DialogTitle>
-          <DialogDescription>
-            Login Google, lihat file Docs/Sheets/Slides asli, buat file dari
-            prompt langsung ke Google, atau import file lokal ke Google Drive.
-          </DialogDescription>
-        </DialogHeader>
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
+      <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-3 py-2 sm:px-5">
+        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
+          <ArrowLeft className="size-4" /> Back to kanban
+        </Button>
+        <div className="min-w-0">
+          <h1 className="flex items-center gap-2 text-sm font-semibold">
+            <ActiveIcon className="size-4 text-accent" /> Google Workspace
+          </h1>
+          <p className="hidden text-[11px] text-muted sm:block">
+            Pilih file, lihat preview, lalu prompt AI tanpa keluar dari halaman.
+          </p>
+        </div>
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <select
+            className="h-9 max-w-44 rounded-lg border border-border bg-elevated px-2 text-xs outline-none"
+            value={selectedProvider?.id || ""}
+            onChange={(event) => setProviderId(event.target.value)}
+            title="AI provider"
+          >
+            {!providers.length && <option value="">No AI provider</option>}
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-9 max-w-52 rounded-lg border border-border bg-elevated px-2 text-xs outline-none"
+            value={modelId}
+            onChange={(event) => setModelId(event.target.value)}
+            disabled={!selectedProvider}
+            title="AI model"
+          >
+            {!selectedProvider && <option value="">No model</option>}
+            {selectedProvider?.models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+          <Button
+            size="sm"
+            variant="secondary"
+            disabled={!google?.connected || busy}
+            onClick={() => void loadFiles(query)}
+          >
+            <RefreshCw className={cn("size-3.5", busy && "animate-spin")} />
+            Refresh files
+          </Button>
+        </div>
+      </header>
 
-        <div className="grid min-h-[min(620px,calc(100vh-180px))] gap-4 lg:grid-cols-[340px_1fr]">
+      <main className="scrollbar-thin min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+        <div className="grid min-h-full gap-4 xl:grid-cols-[320px_minmax(0,1fr)]">
           <aside className="space-y-4 rounded-2xl border border-border bg-panel p-4">
             <div className="rounded-xl border border-border bg-elevated p-3">
               <div className="flex items-center justify-between gap-2">
@@ -605,15 +713,25 @@ export function GoogleWorkspaceModal({
                   return (
                     <article
                       key={`${file.provider}:${file.externalFileId}`}
+                      role="button"
+                      tabIndex={0}
+                      onClick={() => setSelectedFile(file)}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" || event.key === " ")
+                          setSelectedFile(file);
+                      }}
                       className={cn(
-                        "flex items-center gap-3 rounded-xl border bg-elevated p-3",
+                        "flex cursor-pointer items-center gap-3 rounded-xl border bg-elevated p-3 transition hover:border-accent/60",
                         selected ? "border-accent" : "border-border",
                       )}
                     >
                       <Icon className="size-5 shrink-0 text-accent" />
                       <button
                         className="min-w-0 flex-1 text-left"
-                        onClick={() => setSelectedFile(file)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedFile(file);
+                        }}
                       >
                         <h3 className="truncate text-sm font-medium">
                           {file.fileName}
@@ -627,7 +745,10 @@ export function GoogleWorkspaceModal({
                       <Button
                         size="sm"
                         variant={selected ? "default" : "secondary"}
-                        onClick={() => setSelectedFile(file)}
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          setSelectedFile(file);
+                        }}
                       >
                         Select
                       </Button>
@@ -679,12 +800,28 @@ export function GoogleWorkspaceModal({
                         {selectedFile.fileName}
                       </p>
                       <p className="mt-1 text-[11px] text-muted">
-                        Target task:{" "}
-                        {selectedTask
-                          ? `KD-${selectedTask.number} · ${selectedTask.title}`
-                          : "pilih task dulu di board"}
+                        Prompt dapat memakai task yang ada atau otomatis membuat
+                        task workspace baru.
                       </p>
                     </div>
+                    <select
+                      className={`${field} text-xs`}
+                      value={selectedTask?.uid || ""}
+                      onChange={(event) =>
+                        onSelectTask(
+                          tasks.find(
+                            (task) => task.uid === event.target.value,
+                          ) || null,
+                        )
+                      }
+                    >
+                      <option value="">Auto-create task dari prompt ini</option>
+                      {tasks.map((task) => (
+                        <option key={task.uid} value={task.uid}>
+                          KD-{task.number} · {task.title}
+                        </option>
+                      ))}
+                    </select>
                     <textarea
                       className={`${field} min-h-28 text-xs`}
                       value={filePrompt}
@@ -722,7 +859,12 @@ export function GoogleWorkspaceModal({
                     </div>
                     <Button
                       className="w-full"
-                      disabled={busy || !selectedTask}
+                      disabled={
+                        busy ||
+                        !filePrompt.trim() ||
+                        !selectedProvider ||
+                        !modelId
+                      }
                       onClick={() => void attachAndAskSelectedFile()}
                     >
                       {busy ? (
@@ -786,7 +928,7 @@ export function GoogleWorkspaceModal({
             </div>
           </section>
         </div>
-      </DialogContent>
-    </Dialog>
+      </main>
+    </div>
   );
 }

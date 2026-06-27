@@ -567,13 +567,15 @@ app.post("/api/tasks/:taskUid/ai-file-actions", async (request, reply) => {
   const aiSession = task.assignedSessionUid
     ? getSession(task.assignedSessionUid)
     : listSessions(task.projectUid)[0];
+  const providerId = input.providerId || aiSession?.providerId;
+  const modelId = input.modelId || aiSession?.modelId;
   let aiDraft: string | undefined;
-  if (project && aiSession && context) {
+  if (project && providerId && modelId && context) {
     try {
       aiDraft = await openCode.brainstorm(
         project.localPath,
-        aiSession.providerId,
-        aiSession.modelId,
+        providerId,
+        modelId,
         [
           "You are KarsaDesk's revision assistant for an external workspace file.",
           file.provider === "google"

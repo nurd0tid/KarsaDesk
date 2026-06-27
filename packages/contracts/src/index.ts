@@ -230,6 +230,8 @@ export const CreateAiFileActionSchema = z.object({
   prompt: z.string().min(3),
   actionType: z.string().default("plan"),
   applyMode: z.enum(["preview", "auto_apply"]).default("preview"),
+  providerId: z.string().min(1).optional(),
+  modelId: z.string().min(1).optional(),
 });
 
 export const NormalizedEventSchema = z.object({

@@ -446,6 +446,46 @@ export function Dashboard() {
       />
     );
 
+  if (googleWorkspaceOpen && api)
+    return (
+      <GoogleWorkspaceModal
+        open
+        onOpenChange={setGoogleWorkspaceOpen}
+        api={api}
+        project={project}
+        tasks={tasks}
+        selectedTask={selectedTask}
+        providers={integration?.providers || []}
+        initialProviderId={defaultProvider?.id || ""}
+        initialModelId={defaultModel?.id || ""}
+        onSelectTask={setSelectedTask}
+        onTaskCreated={(task) => {
+          setTasks((items) => [...items, task]);
+          setSelectedTask(task);
+        }}
+      />
+    );
+
+  if (figmaOpen && api)
+    return (
+      <FigmaLiveModal
+        open
+        onOpenChange={setFigmaOpen}
+        api={api}
+        project={project}
+        tasks={tasks}
+        selectedTask={selectedTask}
+        providers={integration?.providers || []}
+        initialProviderId={defaultProvider?.id || ""}
+        initialModelId={defaultModel?.id || ""}
+        onSelectTask={setSelectedTask}
+        onTaskCreated={(task) => {
+          setTasks((items) => [...items, task]);
+          setSelectedTask(task);
+        }}
+      />
+    );
+
   return (
     <div className="flex h-screen min-h-0 overflow-hidden bg-background">
       <aside className="flex w-[72px] shrink-0 flex-col items-center border-r border-border bg-panel py-3">
@@ -1033,19 +1073,6 @@ export function Dashboard() {
           setSessions((items) => [value, ...items]);
           setSessionUid(value.uid);
         }}
-      />
-      <GoogleWorkspaceModal
-        open={googleWorkspaceOpen}
-        onOpenChange={setGoogleWorkspaceOpen}
-        api={api}
-        selectedTask={selectedTask}
-      />
-      <FigmaLiveModal
-        open={figmaOpen}
-        onOpenChange={setFigmaOpen}
-        api={api}
-        project={project}
-        selectedTask={selectedTask}
       />
     </div>
   );

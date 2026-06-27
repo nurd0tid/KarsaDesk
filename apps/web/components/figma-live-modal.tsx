@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import {
+  ArrowLeft,
   CheckCircle2,
   Copy,
   ExternalLink,
@@ -17,18 +18,12 @@ import type {
   ConnectedAccountPublic,
   ConnectedFile,
   Project,
+  Provider,
   Task,
 } from "@vk/contracts";
 import type { ApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { MarkdownViewer } from "@/components/markdown-viewer";
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
 
 type AccountPayload = {
   google: ConnectedAccountPublic;
@@ -62,13 +57,25 @@ export function FigmaLiveModal({
   onOpenChange,
   api,
   project,
+  tasks,
   selectedTask,
+  providers,
+  initialProviderId,
+  initialModelId,
+  onSelectTask,
+  onTaskCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   api: ApiClient | null;
   project: Project | null;
+  tasks: Task[];
   selectedTask: Task | null;
+  providers: Provider[];
+  initialProviderId: string;
+  initialModelId: string;
+  onSelectTask: (task: Task | null) => void;
+  onTaskCreated: (task: Task) => void;
 }) {
   const [accounts, setAccounts] = useState<AccountPayload | null>(null);
   const [pat, setPat] = useState("");
@@ -80,9 +87,15 @@ export function FigmaLiveModal({
     "idle" | "reading" | "thinking" | "ready" | "failed"
   >("idle");
   const [busy, setBusy] = useState(false);
+  const [providerId, setProviderId] = useState(initialProviderId);
+  const [modelId, setModelId] = useState(initialModelId);
   const fileKey = useMemo(() => figmaFileKey(fileUrl), [fileUrl]);
   const embedUrl = useMemo(() => figmaEmbedUrl(fileUrl), [fileUrl]);
   const figma = accounts?.figma;
+  const selectedProvider =
+    providers.find((provider) => provider.id === providerId) ||
+    providers[0] ||
+    null;
 
   async function loadStatus() {
     if (!api) return;
@@ -96,6 +109,15 @@ export function FigmaLiveModal({
   useEffect(() => {
     if (open) void loadStatus();
   }, [open, api]);
+
+  useEffect(() => {
+    if (selectedProvider && !providerId) setProviderId(selectedProvider.id);
+    if (
+      selectedProvider &&
+      !selectedProvider.models.some((model) => model.id === modelId)
+    )
+      setModelId(selectedProvider.models[0]?.id || "");
+  }, [modelId, providerId, selectedProvider]);
 
   useEffect(() => {
     function refreshFromProviderEvent(value?: string | null) {
@@ -189,18 +211,52 @@ export function FigmaLiveModal({
     toast.success("Figma file key copied");
   }
 
+  async function ensureTargetTask() {
+    if (selectedTask) return selectedTask;
+    if (!api || !project || !fileKey || !prompt.trim()) return null;
+    const task = await api.post<Task>(`/api/projects/${project.uid}/tasks`, {
+      title: `Figma: ${prompt.trim().slice(0, 72)}`,
+      roughPrompt: prompt.trim(),
+      refinedPrompt: [
+        "# Figma workspace task",
+        "",
+        `File: ${fileUrl}`,
+        "",
+        prompt.trim(),
+      ].join("\n"),
+      mode: "build",
+      priority: "medium",
+      acceptanceCriteria: [
+        "New screens remain visually consistent with the selected Figma file.",
+        "The AI proposal identifies frames, components, states, and responsive behavior.",
+      ],
+      verification: [
+        "Review the embedded Figma canvas and the generated design specification.",
+      ],
+      dependencyUids: [],
+      source: "manual",
+    });
+    onTaskCreated(task);
+    return task;
+  }
+
   async function attachAndAskFigma() {
     if (!api || !fileKey) return;
-    if (!selectedTask) {
-      toast.error("Pilih task dulu di board, baru attach Figma ke task itu.");
+    if (!prompt.trim()) {
+      toast.error("Tulis dulu screen atau flow yang ingin dibuat.");
       return;
     }
     setBusy(true);
     setActionStage("reading");
     setActionResult("");
     try {
+      const targetTask = await ensureTargetTask();
+      if (!targetTask)
+        throw new Error(
+          "Pilih project atau task terlebih dahulu agar pekerjaan bisa dilacak.",
+        );
       const connected = await api.post<ConnectedFile>(
-        `/api/tasks/${selectedTask.uid}/connected-files/from-provider`,
+        `/api/tasks/${targetTask.uid}/connected-files/from-provider`,
         {
           provider: "figma",
           externalFileId: fileKey,
@@ -212,12 +268,14 @@ export function FigmaLiveModal({
       if (prompt.trim()) {
         setActionStage("thinking");
         const action = await api.post<AiFileAction>(
-          `/api/tasks/${selectedTask.uid}/ai-file-actions`,
+          `/api/tasks/${targetTask.uid}/ai-file-actions`,
           {
             connectedFileUid: connected.uid,
             prompt: prompt.trim(),
             actionType: "plan",
             applyMode: "preview",
+            providerId: selectedProvider?.id,
+            modelId: modelId || undefined,
           },
         );
         setActionResult(action.resultSummary || action.errorMessage || "");
@@ -229,7 +287,7 @@ export function FigmaLiveModal({
       }
       if (!prompt.trim()) setActionStage("ready");
       setPreviewRevision((value) => value + 1);
-      toast.success(`Figma attached to KD-${selectedTask.number}`);
+      toast.success(`Figma design brief prepared in KD-${targetTask.number}`);
     } catch (error) {
       setActionStage("failed");
       toast.error(error instanceof Error ? error.message : String(error));
@@ -239,20 +297,60 @@ export function FigmaLiveModal({
   }
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="max-h-[calc(100vh-24px)] w-[min(1380px,calc(100vw-24px))] overflow-auto">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2">
-            <Palette className="size-5 text-accent" /> Figma Live
-          </DialogTitle>
-          <DialogDescription>
-            Figma is live: connect OAuth or PAT locally, open the real Figma
-            file, then attach it to a task from Connected Files for AI context
-            and review history.
-          </DialogDescription>
-        </DialogHeader>
+    <div className="flex h-screen min-h-0 flex-col overflow-hidden bg-background">
+      <header className="flex min-h-16 shrink-0 flex-wrap items-center gap-3 border-b border-border bg-panel px-3 py-2 sm:px-5">
+        <Button size="sm" variant="ghost" onClick={() => onOpenChange(false)}>
+          <ArrowLeft className="size-4" /> Back to kanban
+        </Button>
+        <div className="min-w-0">
+          <h1 className="flex items-center gap-2 text-sm font-semibold">
+            <Palette className="size-4 text-accent" /> Figma Workspace
+          </h1>
+          <p className="hidden text-[11px] text-muted sm:block">
+            Buka canvas, pilih model, lalu jelaskan screen atau flow baru.
+          </p>
+        </div>
+        <div className="ml-auto flex min-w-0 flex-wrap items-center justify-end gap-2">
+          <select
+            className="h-9 max-w-44 rounded-lg border border-border bg-elevated px-2 text-xs outline-none"
+            value={selectedProvider?.id || ""}
+            onChange={(event) => setProviderId(event.target.value)}
+            title="AI provider"
+          >
+            {!providers.length && <option value="">No AI provider</option>}
+            {providers.map((provider) => (
+              <option key={provider.id} value={provider.id}>
+                {provider.name}
+              </option>
+            ))}
+          </select>
+          <select
+            className="h-9 max-w-52 rounded-lg border border-border bg-elevated px-2 text-xs outline-none"
+            value={modelId}
+            onChange={(event) => setModelId(event.target.value)}
+            disabled={!selectedProvider}
+            title="AI model"
+          >
+            {!selectedProvider && <option value="">No model</option>}
+            {selectedProvider?.models.map((model) => (
+              <option key={model.id} value={model.id}>
+                {model.name}
+              </option>
+            ))}
+          </select>
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={() => void loadStatus()}
+            disabled={!api || busy}
+          >
+            <RefreshCw className="size-3.5" /> Refresh connection
+          </Button>
+        </div>
+      </header>
 
-        <div className="grid gap-4 md:grid-cols-[1fr_280px]">
+      <main className="scrollbar-thin min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+        <div className="grid min-h-full gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
           <section className="space-y-4 rounded-2xl border border-border bg-elevated p-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
@@ -405,18 +503,66 @@ export function FigmaLiveModal({
             </div>
 
             <div className="rounded-xl border border-border bg-panel p-3">
-              <p className="text-xs font-semibold">Prompt selected Figma</p>
+              <p className="text-xs font-semibold">Design with AI</p>
               <p className="mt-1 text-[11px] leading-5 text-muted">
-                Target task:{" "}
-                {selectedTask
-                  ? `KD-${selectedTask.number} · ${selectedTask.title}`
-                  : "pilih task dulu di board"}
+                Jelaskan screen/flow baru. KarsaDesk membaca canvas saat ini
+                agar hasilnya konsisten dengan desain login yang sudah ada.
               </p>
+              <div className="mt-3 flex flex-wrap gap-1.5">
+                {[
+                  {
+                    label: "Register",
+                    value:
+                      "Pelajari halaman login yang tampil. Buat spesifikasi halaman register yang konsisten: nama, email, password, konfirmasi password, social signup, validation, loading, success, dan responsive mobile.",
+                  },
+                  {
+                    label: "OTP verification",
+                    value:
+                      "Pelajari halaman login yang tampil. Buat flow OTP verification yang konsisten: input 6 digit, countdown resend, error, expired code, success, loading, dan responsive mobile.",
+                  },
+                  {
+                    label: "Forgot password",
+                    value:
+                      "Pelajari halaman login yang tampil. Buat flow forgot password, email sent, reset password, success, error, dan semua state responsive dengan design system yang sama.",
+                  },
+                  {
+                    label: "Complete auth flow",
+                    value:
+                      "Gunakan login screen ini sebagai sumber visual. Rancang flow lengkap register, OTP verification, forgot password, reset password, success/error/loading states, desktop dan mobile. Jelaskan frame, component reuse, spacing, typography, dan prototype connections.",
+                  },
+                ].map((item) => (
+                  <button
+                    key={item.label}
+                    type="button"
+                    className="rounded-full border border-border bg-elevated px-2.5 py-1 text-[10px] text-muted transition hover:border-accent hover:text-accent"
+                    onClick={() => setPrompt(item.value)}
+                  >
+                    {item.label}
+                  </button>
+                ))}
+              </div>
+              <select
+                className={`${field} mt-3 text-xs`}
+                value={selectedTask?.uid || ""}
+                onChange={(event) =>
+                  onSelectTask(
+                    tasks.find((task) => task.uid === event.target.value) ||
+                      null,
+                  )
+                }
+              >
+                <option value="">Auto-create task dari prompt ini</option>
+                {tasks.map((task) => (
+                  <option key={task.uid} value={task.uid}>
+                    KD-{task.number} · {task.title}
+                  </option>
+                ))}
+              </select>
               <textarea
                 className={`${field} mt-3 min-h-24 text-xs`}
                 value={prompt}
                 onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Contoh: pahami flow design ini, buat review UX, susun perubahan untuk mobile, cek komponen yang perlu dirapikan..."
+                placeholder="Contoh: gunakan login ini sebagai acuan, lalu buat halaman register dan OTP lengkap dengan semua state desktop/mobile..."
               />
               <div
                 className="mt-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-elevated p-1 text-center text-[9px] uppercase tracking-wide"
@@ -449,7 +595,13 @@ export function FigmaLiveModal({
               </div>
               <Button
                 className="mt-3 w-full"
-                disabled={!fileKey || !selectedTask || busy}
+                disabled={
+                  !fileKey ||
+                  !prompt.trim() ||
+                  !selectedProvider ||
+                  !modelId ||
+                  busy
+                }
                 onClick={() => void attachAndAskFigma()}
               >
                 {busy ? (
@@ -461,7 +613,7 @@ export function FigmaLiveModal({
                   ? "Reading Figma tree..."
                   : actionStage === "thinking"
                     ? "AI reviewing design..."
-                    : "Attach & prepare AI review"}
+                    : "Generate design specification"}
               </Button>
               {actionResult && (
                 <MarkdownViewer
@@ -479,8 +631,11 @@ export function FigmaLiveModal({
             <ol className="list-decimal space-y-1 pl-4 text-xs">
               <li>Connect OAuth/PAT sampai status connected.</li>
               <li>Paste URL Figma file yang mau dibantu.</li>
-              <li>Pilih task di board sebagai target pekerjaan.</li>
-              <li>Klik Attach to task & ask AI.</li>
+              <li>Pilih contoh prompt Register/OTP atau tulis sendiri.</li>
+              <li>
+                Pilih task existing, atau biarkan KarsaDesk membuat task baru
+                otomatis.
+              </li>
               <li>
                 AI membaca metadata/tree Figma dan membuat preview rencana
                 perubahan untuk task itu.
@@ -502,7 +657,7 @@ export function FigmaLiveModal({
             </Button>
           </aside>
         </div>
-      </DialogContent>
-    </Dialog>
+      </main>
+    </div>
   );
 }
