@@ -24,6 +24,7 @@ import {
   Sparkles,
   Sun,
   TerminalSquare,
+  Trash2,
   Wifi,
   WifiOff,
 } from "lucide-react";
@@ -292,6 +293,43 @@ export function Dashboard() {
       await refresh();
     }
   }
+
+  async function deleteTasks(input: {
+    taskUids?: string[];
+    status?: Task["status"];
+    label: string;
+  }) {
+    if (!api || !project) return;
+    const count = input.taskUids?.length;
+    if (
+      !window.confirm(
+        `Delete ${count ? `${count} selected task(s)` : `all tasks in ${input.label}`}? Assigned running sessions will be paused and structured records will also be deleted from NocoDB.`,
+      )
+    )
+      return;
+    setQuickSessionBusy(true);
+    try {
+      const result = await api.post<{ deletedTasks: number }>(
+        `/api/projects/${project.uid}/tasks/delete`,
+        {
+          confirmed: true,
+          taskUids: input.taskUids || [],
+          status: input.status,
+        },
+      );
+      setSelectedTask((current) =>
+        current && input.taskUids?.includes(current.uid) ? null : current,
+      );
+      setInspectorOpen(false);
+      setChecked(new Set());
+      await loadProject(api, project.uid, taskPage, query);
+      toast.success(`${result.deletedTasks} task(s) deleted`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    } finally {
+      setQuickSessionBusy(false);
+    }
+  }
   function toggleCheck(uid: string) {
     setChecked((current) => {
       const next = new Set(current);
@@ -453,12 +491,9 @@ export function Dashboard() {
         onOpenChange={setGoogleWorkspaceOpen}
         api={api}
         project={project}
-        tasks={tasks}
-        selectedTask={selectedTask}
         providers={integration?.providers || []}
         initialProviderId={defaultProvider?.id || ""}
         initialModelId={defaultModel?.id || ""}
-        onSelectTask={setSelectedTask}
         onTaskCreated={(task) => {
           setTasks((items) => [...items, task]);
           setSelectedTask(task);
@@ -473,12 +508,9 @@ export function Dashboard() {
         onOpenChange={setFigmaOpen}
         api={api}
         project={project}
-        tasks={tasks}
-        selectedTask={selectedTask}
         providers={integration?.providers || []}
         initialProviderId={defaultProvider?.id || ""}
         initialModelId={defaultModel?.id || ""}
-        onSelectTask={setSelectedTask}
         onTaskCreated={(task) => {
           setTasks((items) => [...items, task]);
           setSelectedTask(task);
@@ -698,6 +730,12 @@ export function Dashboard() {
                     onMove={(task, status, sortOrder) =>
                       void patchTask(task, { status, sortOrder })
                     }
+                    onClearColumn={(status) =>
+                      void deleteTasks({
+                        status,
+                        label: status.replaceAll("_", " "),
+                      })
+                    }
                   />
                 )}
               </section>
@@ -886,6 +924,27 @@ export function Dashboard() {
                           </p>
                         )}
                       </div>
+                      <div className="border-t border-border pt-4">
+                        <Button
+                          variant="danger"
+                          size="sm"
+                          className="w-full"
+                          disabled={quickSessionBusy}
+                          onClick={() =>
+                            void deleteTasks({
+                              taskUids: [selectedTask.uid],
+                              label: `KD-${selectedTask.number}`,
+                            })
+                          }
+                        >
+                          {quickSessionBusy ? (
+                            <Loader2 className="size-3.5 animate-spin" />
+                          ) : (
+                            <Trash2 className="size-3.5" />
+                          )}
+                          Delete this task
+                        </Button>
+                      </div>
                     </div>
                   </aside>
                 </>
@@ -994,6 +1053,22 @@ export function Dashboard() {
                 </Button>
               )}
               <div className="ml-auto flex flex-wrap justify-end gap-1.5">
+                {!!checked.size && (
+                  <Button
+                    variant="danger"
+                    size="sm"
+                    disabled={quickSessionBusy}
+                    onClick={() =>
+                      void deleteTasks({
+                        taskUids: [...checked],
+                        label: "selection",
+                      })
+                    }
+                  >
+                    <Trash2 className="size-3.5" /> Delete selected (
+                    {checked.size})
+                  </Button>
+                )}
                 {!sessionUid && (
                   <Button
                     variant="secondary"

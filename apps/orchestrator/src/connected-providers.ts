@@ -982,11 +982,14 @@ export async function importGoogleWorkspaceFile(input: {
   return getGoogleFile(result.id);
 }
 
-export async function readGoogleFileText(file: ConnectedFile) {
+export async function readGoogleWorkspaceText(
+  externalFileId: string,
+  fileType: "docs" | "sheets" | "slides",
+) {
   const token = await googleAccessToken();
-  const mimeType = file.fileType === "sheets" ? "text/csv" : "text/plain";
+  const mimeType = fileType === "sheets" ? "text/csv" : "text/plain";
   const url = new URL(
-    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(file.externalFileId)}/export`,
+    `https://www.googleapis.com/drive/v3/files/${encodeURIComponent(externalFileId)}/export`,
   );
   url.searchParams.set("mimeType", mimeType);
   const response = await fetch(url, {
@@ -1007,6 +1010,12 @@ export async function readGoogleFileText(file: ConnectedFile) {
     );
   }
   return (await response.text()).slice(0, 20_000);
+}
+
+export async function readGoogleFileText(file: ConnectedFile) {
+  if (file.fileType === "figma")
+    throw new Error("Figma files cannot be exported through Google Drive");
+  return readGoogleWorkspaceText(file.externalFileId, file.fileType);
 }
 
 function figmaHeaders(): Record<string, string> {
@@ -1140,43 +1149,59 @@ export async function createAiFileActionWithContext(args: {
       args.applyMode === "auto_apply"
         ? "Auto-apply was requested, but KarsaDesk keeps provider-file edits in preview mode until explicit apply adapters are enabled."
         : "Preview mode: no original file was modified.";
-    const providerPlan =
-      args.file.provider === "google"
-        ? [
-            "Google action plan:",
-            "- Read current file context through Google Drive export/API.",
-            "- Draft exact edits in a reviewable preview before changing Docs/Sheets/Slides.",
-            "- Apply through official Docs/Sheets/Slides API only after user confirmation.",
-          ].join("\n")
-        : [
-            "Figma action plan:",
-            "- Read file metadata/tree through Figma REST API.",
-            "- Produce design/wireframe/slicing instructions for review.",
-            "- Direct canvas mutation is reserved for the future Figma Plugin bridge.",
-          ].join("\n");
-    resultSummary = [
-      `# AI revision preview — ${args.file.fileName}`,
-      "",
-      `**Instruction:** ${args.prompt}`,
-      "",
-      args.aiDraft
-        ? ["## Proposed revision", "", args.aiDraft].join("\n")
-        : providerPlan,
-      ...(args.aiError
-        ? [
-            "",
-            "> AI provider did not produce a draft. The provider-safe plan below is shown instead.",
-            `> ${args.aiError}`,
-          ]
-        : []),
-      "",
-      "## Apply safety",
-      "",
-      contextStatus,
-      "The raw provider file content is not copied into the NocoDB action log.",
-      "",
-      `> ${risk}`,
-    ].join("\n");
+    if (args.aiError && !args.aiDraft) {
+      status = "failed";
+      errorMessage = args.aiError;
+      resultSummary = [
+        `# AI provider failed — ${args.file.fileName}`,
+        "",
+        `**Instruction:** ${args.prompt}`,
+        "",
+        `**Provider error:** ${args.aiError}`,
+        "",
+        contextStatus,
+        "",
+        "Select another provider/model or fix its API key/billing in OpenCode, then retry. No task result was applied to the external file.",
+      ].join("\n");
+    } else {
+      const providerPlan =
+        args.file.provider === "google"
+          ? [
+              "Google action plan:",
+              "- Read current file context through Google Drive export/API.",
+              "- Draft exact edits in a reviewable preview before changing Docs/Sheets/Slides.",
+              "- Apply through official Docs/Sheets/Slides API only after user confirmation.",
+            ].join("\n")
+          : [
+              "Figma action plan:",
+              "- Read file metadata/tree through Figma REST API.",
+              "- Produce design/wireframe/slicing instructions for review.",
+              "- Direct canvas mutation is reserved for the future Figma Plugin bridge.",
+            ].join("\n");
+      resultSummary = [
+        `# AI revision preview — ${args.file.fileName}`,
+        "",
+        `**Instruction:** ${args.prompt}`,
+        "",
+        args.aiDraft
+          ? ["## Proposed revision", "", args.aiDraft].join("\n")
+          : providerPlan,
+        ...(args.aiError
+          ? [
+              "",
+              "> AI provider did not produce a draft. The provider-safe plan below is shown instead.",
+              `> ${args.aiError}`,
+            ]
+          : []),
+        "",
+        "## Apply safety",
+        "",
+        contextStatus,
+        "The raw provider file content is not copied into the NocoDB action log.",
+        "",
+        `> ${risk}`,
+      ].join("\n");
+    }
   } catch (error) {
     status = "failed";
     errorMessage = error instanceof Error ? error.message : String(error);

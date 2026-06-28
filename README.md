@@ -18,8 +18,8 @@ UI berjalan di `http://127.0.0.1:3456`. Orchestrator lokal berjalan di `http://1
   - tombol Open ke editor asli Google/Figma;
   - AI Assistant per connected file dengan preview/action history;
   - action history per task.
-- Google Workspace adalah halaman kerja penuh: refresh/pilih file Drive, preview Docs/Sheets/Slides, prompt AI, review, lalu explicit apply non-destruktif.
-- Figma Workspace adalah halaman kerja penuh: connect OAuth/PAT, buka canvas embed, pilih provider/model, lalu gunakan preset atau prompt bebas untuk menyusun screen/flow baru.
+- Google Workspace adalah halaman kerja penuh: refresh/pilih file Drive, gunakan API text preview yang stabil atau Google visual preview, lalu chat dengan AI tanpa membuat task otomatis.
+- Figma Workspace adalah halaman kerja penuh: connect OAuth/PAT, buka canvas embed, pilih provider/model, lalu diskusikan screen/flow baru sebelum membuat task secara eksplisit.
 
 ## Prasyarat
 
@@ -243,8 +243,8 @@ Workflow header **Figma**:
 5. Canvas langsung tampil di halaman KarsaDesk.
 6. Pilih provider/model OpenCode di header.
 7. Pilih preset **Register**, **OTP verification**, **Forgot password**, atau **Complete auth flow**, atau tulis prompt sendiri.
-8. Pilih task existing atau biarkan `Auto-create task` membuat task desain baru.
-9. Klik **Generate design specification** untuk membaca tree Figma dan menghasilkan proposal frame, component, state, responsive behavior, dan prototype connection.
+8. Klik **Ask AI** untuk membaca tree Figma dan mendiskusikan frame, component, state, responsive behavior, dan prototype connection. Ini belum membuat task.
+9. Setelah jawaban sesuai, klik **Create task from this answer** jika memang ingin memasukkannya ke kanban.
 
 Workflow per task:
 
@@ -279,12 +279,13 @@ Klik **Google Docs** di header untuk workflow dokumen utama. KarsaDesk tidak lag
 
 1. Login Google.
 2. Gunakan **Refresh files** untuk mengambil ulang daftar Drive.
-3. Klik kartu file; preview Docs/Sheets/Slides langsung tampil di tengah halaman.
+3. Klik kartu file; API text preview langsung tampil dan tidak bergantung pada login iframe. Gunakan **Google visual** bila ingin bentuk halaman asli.
 4. Pilih provider/model OpenCode di header.
-5. Tulis instruksi di panel kanan. Pilih task existing atau biarkan `Auto-create task` membuat task baru.
-6. Klik **Attach & prepare AI revision**, review proposal, lalu klik **Apply approved revision to Google**.
-7. Apply aman bersifat non-destruktif: Docs append content, Sheets append rows, dan Slides menambah slide.
-8. Jika punya file lokal `.docx/.xlsx/.pptx`, gunakan **Import file to Google** supaya file dikirim dan dikonversi menjadi file Google asli.
+5. Tulis pertanyaan di panel kanan dan klik **Ask AI**. Percakapan tidak membuat task dan tidak mengubah file.
+6. Klik **Create task from this answer** hanya bila percakapan sudah layak dijadikan pekerjaan kanban.
+7. Untuk benar-benar menulis ke Google, buka **Prepare an actual Google change**, lalu review proposal dan klik explicit apply.
+8. Apply aman bersifat non-destruktif: Docs append content, Sheets append rows, dan Slides menambah slide.
+9. Jika punya file lokal `.docx/.xlsx/.pptx`, gunakan **Import file to Google** supaya file dikirim dan dikonversi menjadi file Google asli.
 
 ## Connected Files action behavior
 

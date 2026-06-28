@@ -25,6 +25,8 @@ import {
   detachConnectedFile,
   deleteConnectedAccount,
   deleteSessionLocal,
+  deleteTasksLocal,
+  deleteWorkspaceGeneratedTasks,
   getAiFileAction,
   getConnectedFile,
   getProject,
@@ -65,6 +67,8 @@ import {
   importGoogleWorkspaceFile,
   listGoogleFiles,
   readConnectedFileContext,
+  readFigmaFileSummary,
+  readGoogleWorkspaceText,
   syncConnectedFileMetadata,
 } from "./connected-providers.js";
 import {
@@ -375,6 +379,66 @@ app.patch("/api/tasks/:taskUid", async (request) => {
   return task;
 });
 
+app.post("/api/projects/:projectUid/tasks/delete", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      confirmed: z.literal(true),
+      taskUids: z.array(z.string().uuid()).default([]),
+      status: z
+        .enum([
+          "backlog",
+          "ready",
+          "running",
+          "waiting_approval",
+          "review",
+          "done",
+          "failed",
+          "cancelled",
+        ])
+        .optional(),
+    })
+    .parse(request.body);
+  const candidates = listAllTasks(projectUid).filter(
+    (task) =>
+      input.taskUids.includes(task.uid) ||
+      (input.status !== undefined && task.status === input.status),
+  );
+  if (!candidates.length) return { deletedTasks: 0 };
+  const taskUids = new Set(candidates.map((task) => task.uid));
+  const sessionUids = new Set(
+    candidates
+      .map((task) => task.assignedSessionUid)
+      .filter((uid): uid is string => Boolean(uid)),
+  );
+  for (const sessionUid of sessionUids) {
+    const session = getSession(sessionUid);
+    if (!session) continue;
+    if (["running", "starting"].includes(session.status)) {
+      await openCode.cancel(session).catch(() => undefined);
+      await openCode.stop(sessionUid).catch(() => undefined);
+    }
+    updateSession(sessionUid, {
+      status: ["running", "starting"].includes(session.status)
+        ? "paused"
+        : session.status,
+      activeTaskUid: taskUids.has(session.activeTaskUid || "")
+        ? null
+        : session.activeTaskUid,
+      pendingTaskUids: session.pendingTaskUids.filter(
+        (uid) => !taskUids.has(uid),
+      ),
+    });
+  }
+  const result = deleteTasksLocal([...taskUids]);
+  await syncOutboxOnce().catch((error) =>
+    app.log.warn({ error }, "Task delete sync failed"),
+  );
+  return result;
+});
+
 function inferConnectedFile(input: {
   externalFileUrl: string;
   provider?: "google" | "figma";
@@ -536,6 +600,152 @@ app.get("/api/connected-files/:fileUid/context", async (request) => {
   const file = getConnectedFile(fileUid);
   if (!file) throw app.httpErrors.notFound("Connected file not found");
   return { text: await readConnectedFileContext(file) };
+});
+
+app.get("/api/connect/google/files/:fileId/context", async (request) => {
+  const { fileId } = z
+    .object({ fileId: z.string().min(1) })
+    .parse(request.params);
+  const { fileType } = z
+    .object({ fileType: z.enum(["docs", "sheets", "slides"]) })
+    .parse(request.query);
+  const text = await readGoogleWorkspaceText(fileId, fileType);
+  return { text, characters: text.length };
+});
+
+app.post("/api/projects/:projectUid/workspace-chat", async (request) => {
+  const { projectUid } = z
+    .object({ projectUid: z.string().uuid() })
+    .parse(request.params);
+  const input = z
+    .object({
+      workspace: z.enum(["google", "figma"]),
+      externalFileId: z.string().min(1),
+      externalFileUrl: z.string().url().optional(),
+      fileType: z.enum(["docs", "sheets", "slides", "figma"]),
+      fileName: z.string().min(1),
+      message: z.string().min(2),
+      providerId: z.string().min(1).optional(),
+      modelId: z.string().min(1).optional(),
+      history: z
+        .array(
+          z.object({
+            role: z.enum(["user", "assistant"]),
+            content: z.string(),
+          }),
+        )
+        .default([]),
+    })
+    .parse(request.body);
+  const project = getProject(projectUid);
+  if (!project) throw app.httpErrors.notFound("Project not found");
+  let context = "";
+  try {
+    if (input.workspace === "google") {
+      if (input.fileType === "figma")
+        throw new Error("Invalid Google workspace file type");
+      context = await readGoogleWorkspaceText(
+        input.externalFileId,
+        input.fileType,
+      );
+    } else {
+      const providerFile = await getFigmaFile(input.externalFileId);
+      const now = new Date().toISOString();
+      context = await readFigmaFileSummary({
+        uid: randomUUID(),
+        taskUid: randomUUID(),
+        provider: "figma",
+        fileType: "figma",
+        externalFileId: providerFile.externalFileId,
+        externalFileUrl: input.externalFileUrl || providerFile.externalFileUrl,
+        fileName: providerFile.fileName || input.fileName,
+        thumbnailUrl: providerFile.thumbnailUrl,
+        metadata: providerFile.metadata,
+        status: "synced",
+        connectedBy: "local-user",
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      message: `File context could not be read: ${reason}`,
+      error: reason,
+      fallback: true,
+      contextLoaded: false,
+      contextCharacters: 0,
+    };
+  }
+  if (!input.providerId || !input.modelId) {
+    return {
+      message:
+        "File berhasil dibaca, tetapi belum ada provider/model AI yang dipilih. Pilih provider dan model di header lalu kirim ulang pertanyaan.",
+      error: "No provider/model selected",
+      fallback: true,
+      contextLoaded: true,
+      contextCharacters: context.length,
+    };
+  }
+  const prompt = [
+    `You are KarsaDesk's ${input.workspace === "google" ? "Google Workspace" : "Figma design"} copilot.`,
+    "This is a conversation, not a task execution. Never claim you changed the external file.",
+    "Answer the user's actual intent first. If they ask what the file contains, explain it clearly. If they ask for a change, propose concrete content/design changes and explicitly say they are still a draft.",
+    input.workspace === "figma"
+      ? "For design requests, reference visible pages/frames/components from the context and describe new frames, components, states, responsive behavior, and prototype connections."
+      : "For document requests, use the supplied document text and distinguish explanation, suggested revision, and any facts that still need verification.",
+    "Do not create a kanban task. The user will choose that explicitly in the UI.",
+    "",
+    `File: ${input.fileName}`,
+    `File type: ${input.fileType}`,
+    "",
+    "Recent conversation:",
+    ...input.history.slice(-8).map((item) => `${item.role}: ${item.content}`),
+    "",
+    `User: ${input.message}`,
+    "",
+    "Current provider context:",
+    context.slice(0, 16_000),
+  ].join("\n");
+  try {
+    const message = await openCode.brainstorm(
+      project.localPath,
+      input.providerId,
+      input.modelId,
+      prompt,
+    );
+    return {
+      message,
+      error: null,
+      fallback: false,
+      contextLoaded: true,
+      contextCharacters: context.length,
+    };
+  } catch (error) {
+    const reason = error instanceof Error ? error.message : String(error);
+    return {
+      message: [
+        "File berhasil dibaca, tetapi provider AI gagal menjawab.",
+        "",
+        `Error provider: ${reason}`,
+        "",
+        "Pilih provider/model lain atau perbaiki API key/billing di OpenCode, lalu tekan Retry.",
+      ].join("\n"),
+      error: reason,
+      fallback: true,
+      contextLoaded: true,
+      contextCharacters: context.length,
+    };
+  }
+});
+
+app.post("/api/workspace/tasks/cleanup", async (request) => {
+  z.object({ confirmed: z.literal(true) }).parse(request.body);
+  const result = deleteWorkspaceGeneratedTasks();
+  await syncOutboxOnce().catch((error) =>
+    app.log.warn({ error }, "Workspace task cleanup sync failed"),
+  );
+  return result;
 });
 
 app.delete("/api/connected-files/:fileUid", async (request) => {

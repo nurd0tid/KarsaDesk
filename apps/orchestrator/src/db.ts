@@ -338,6 +338,74 @@ export function updateSession(uid: string, values: Partial<Session>): Session {
   return session;
 }
 
+function deleteTaskCascade(task: Task) {
+  const files = db
+    .select({ uid: schema.connectedFiles.uid })
+    .from(schema.connectedFiles)
+    .where(eq(schema.connectedFiles.taskUid, task.uid))
+    .all();
+  const actions = db
+    .select({ uid: schema.aiFileActions.uid })
+    .from(schema.aiFileActions)
+    .where(eq(schema.aiFileActions.taskUid, task.uid))
+    .all();
+  const taskReviews = db
+    .select({ uid: schema.reviews.uid })
+    .from(schema.reviews)
+    .where(eq(schema.reviews.taskUid, task.uid))
+    .all();
+  const taskLogs = db
+    .select({ uid: schema.dailyLogs.uid })
+    .from(schema.dailyLogs)
+    .where(eq(schema.dailyLogs.taskUid, task.uid))
+    .all();
+  for (const file of files) enqueueDelete("vk_task_connected_files", file.uid);
+  for (const action of actions) enqueueDelete("vk_ai_file_actions", action.uid);
+  for (const review of taskReviews) enqueueDelete("vk_reviews", review.uid);
+  for (const log of taskLogs) enqueueDelete("vk_daily_logs", log.uid);
+  enqueueDelete("vk_tasks", task.uid);
+  db.delete(schema.aiFileActions)
+    .where(eq(schema.aiFileActions.taskUid, task.uid))
+    .run();
+  db.delete(schema.connectedFiles)
+    .where(eq(schema.connectedFiles.taskUid, task.uid))
+    .run();
+  db.delete(schema.reviews).where(eq(schema.reviews.taskUid, task.uid)).run();
+  db.delete(schema.dailyLogs)
+    .where(eq(schema.dailyLogs.taskUid, task.uid))
+    .run();
+  db.delete(schema.tasks).where(eq(schema.tasks.uid, task.uid)).run();
+  const dependants = db.select().from(schema.tasks).all() as Task[];
+  for (const dependant of dependants) {
+    if (!dependant.dependencyUids.includes(task.uid)) continue;
+    updateTask(dependant.uid, {
+      dependencyUids: dependant.dependencyUids.filter(
+        (dependencyUid) => dependencyUid !== task.uid,
+      ),
+    });
+  }
+}
+
+export function deleteTasksLocal(taskUids: string[]) {
+  const unique = new Set(taskUids);
+  const tasks = (db.select().from(schema.tasks).all() as Task[]).filter(
+    (task) => unique.has(task.uid),
+  );
+  for (const task of tasks) deleteTaskCascade(task);
+  return { deletedTasks: tasks.length };
+}
+
+export function deleteWorkspaceGeneratedTasks() {
+  const generated = (db.select().from(schema.tasks).all() as Task[]).filter(
+    (task) =>
+      /^# (Google (Docs|Sheets|Slides)|Figma) workspace task/m.test(
+        task.refinedPrompt,
+      ) || /^(Google (Docs|Sheets|Slides)|Figma):\s/i.test(task.title),
+  );
+  for (const task of generated) deleteTaskCascade(task);
+  return { deletedTasks: generated.length };
+}
+
 export function deleteSessionLocal(uid: string, deleteTasks = true) {
   const now = new Date().toISOString();
   const assignedTasks = db
@@ -347,55 +415,7 @@ export function deleteSessionLocal(uid: string, deleteTasks = true) {
     .all() as Task[];
   for (const task of assignedTasks) {
     if (deleteTasks) {
-      const files = db
-        .select({ uid: schema.connectedFiles.uid })
-        .from(schema.connectedFiles)
-        .where(eq(schema.connectedFiles.taskUid, task.uid))
-        .all();
-      const actions = db
-        .select({ uid: schema.aiFileActions.uid })
-        .from(schema.aiFileActions)
-        .where(eq(schema.aiFileActions.taskUid, task.uid))
-        .all();
-      const taskReviews = db
-        .select({ uid: schema.reviews.uid })
-        .from(schema.reviews)
-        .where(eq(schema.reviews.taskUid, task.uid))
-        .all();
-      const taskLogs = db
-        .select({ uid: schema.dailyLogs.uid })
-        .from(schema.dailyLogs)
-        .where(eq(schema.dailyLogs.taskUid, task.uid))
-        .all();
-      for (const file of files)
-        enqueueDelete("vk_task_connected_files", file.uid);
-      for (const action of actions)
-        enqueueDelete("vk_ai_file_actions", action.uid);
-      for (const review of taskReviews) enqueueDelete("vk_reviews", review.uid);
-      for (const log of taskLogs) enqueueDelete("vk_daily_logs", log.uid);
-      enqueueDelete("vk_tasks", task.uid);
-      db.delete(schema.aiFileActions)
-        .where(eq(schema.aiFileActions.taskUid, task.uid))
-        .run();
-      db.delete(schema.connectedFiles)
-        .where(eq(schema.connectedFiles.taskUid, task.uid))
-        .run();
-      db.delete(schema.reviews)
-        .where(eq(schema.reviews.taskUid, task.uid))
-        .run();
-      db.delete(schema.dailyLogs)
-        .where(eq(schema.dailyLogs.taskUid, task.uid))
-        .run();
-      db.delete(schema.tasks).where(eq(schema.tasks.uid, task.uid)).run();
-      const dependants = db.select().from(schema.tasks).all() as Task[];
-      for (const dependant of dependants) {
-        if (!dependant.dependencyUids.includes(task.uid)) continue;
-        updateTask(dependant.uid, {
-          dependencyUids: dependant.dependencyUids.filter(
-            (dependencyUid) => dependencyUid !== task.uid,
-          ),
-        });
-      }
+      deleteTaskCascade(task);
     } else {
       const status = [
         "running",

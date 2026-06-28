@@ -32,6 +32,7 @@ import {
   ListChecks,
   ShieldAlert,
   TerminalSquare,
+  Trash2,
   XCircle,
 } from "lucide-react";
 import type { Task } from "@vk/contracts";
@@ -63,10 +64,12 @@ function BoardColumn({
   column,
   tasks,
   children,
+  onClear,
 }: {
   column: (typeof columns)[number];
   tasks: Task[];
   children: React.ReactNode;
+  onClear: () => void;
 }) {
   const { setNodeRef, isOver } = useDroppable({
     id: column.id,
@@ -89,12 +92,24 @@ function BoardColumn({
             {tasks.length}
           </span>
         </div>
-        <span
-          className={cn(
-            "status-dot size-1.5 rounded-full bg-current",
-            column.dot,
+        <div className="flex items-center gap-1">
+          {!!tasks.length && (
+            <button
+              className="rounded p-1.5 text-muted transition hover:bg-danger/10 hover:text-danger"
+              onClick={onClear}
+              title={`Clear all ${column.title} tasks`}
+              aria-label={`Clear all ${column.title} tasks`}
+            >
+              <Trash2 className="size-3.5" />
+            </button>
           )}
-        />
+          <span
+            className={cn(
+              "status-dot size-1.5 rounded-full bg-current",
+              column.dot,
+            )}
+          />
+        </div>
       </header>
       <div className="scrollbar-thin flex min-h-0 flex-1 flex-col gap-2 overflow-y-auto p-2">
         {children}
@@ -285,6 +300,7 @@ export function KanbanBoard({
   onOpen,
   onCheck,
   onMove,
+  onClearColumn,
 }: {
   tasks: Task[];
   selectedTaskUid: string | null;
@@ -292,6 +308,7 @@ export function KanbanBoard({
   onOpen: (task: Task) => void;
   onCheck: (uid: string) => void;
   onMove: (task: Task, status: Task["status"], sortOrder: number) => void;
+  onClearColumn: (status: Task["status"]) => void;
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
@@ -353,7 +370,12 @@ export function KanbanBoard({
         {columns.map((column) => {
           const items = grouped[column.id] || [];
           return (
-            <BoardColumn key={column.id} column={column} tasks={items}>
+            <BoardColumn
+              key={column.id}
+              column={column}
+              tasks={items}
+              onClear={() => onClearColumn(column.id)}
+            >
               <SortableContext
                 items={items.map((task) => task.uid)}
                 strategy={verticalListSortingStrategy}

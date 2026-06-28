@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import type {
-  AiFileAction,
   ConnectedAccountPublic,
   ConnectedFile,
   Project,
@@ -23,7 +22,7 @@ import type {
 } from "@vk/contracts";
 import type { ApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
-import { MarkdownViewer } from "@/components/markdown-viewer";
+import { WorkspaceAiPanel } from "@/components/workspace-ai-panel";
 
 type AccountPayload = {
   google: ConnectedAccountPublic;
@@ -57,35 +56,24 @@ export function FigmaLiveModal({
   onOpenChange,
   api,
   project,
-  tasks,
-  selectedTask,
   providers,
   initialProviderId,
   initialModelId,
-  onSelectTask,
   onTaskCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   api: ApiClient | null;
   project: Project | null;
-  tasks: Task[];
-  selectedTask: Task | null;
   providers: Provider[];
   initialProviderId: string;
   initialModelId: string;
-  onSelectTask: (task: Task | null) => void;
   onTaskCreated: (task: Task) => void;
 }) {
   const [accounts, setAccounts] = useState<AccountPayload | null>(null);
   const [pat, setPat] = useState("");
   const [fileUrl, setFileUrl] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [actionResult, setActionResult] = useState("");
   const [previewRevision, setPreviewRevision] = useState(0);
-  const [actionStage, setActionStage] = useState<
-    "idle" | "reading" | "thinking" | "ready" | "failed"
-  >("idle");
   const [busy, setBusy] = useState(false);
   const [providerId, setProviderId] = useState(initialProviderId);
   const [modelId, setModelId] = useState(initialModelId);
@@ -211,52 +199,37 @@ export function FigmaLiveModal({
     toast.success("Figma file key copied");
   }
 
-  async function ensureTargetTask() {
-    if (selectedTask) return selectedTask;
-    if (!api || !project || !fileKey || !prompt.trim()) return null;
-    const task = await api.post<Task>(`/api/projects/${project.uid}/tasks`, {
-      title: `Figma: ${prompt.trim().slice(0, 72)}`,
-      roughPrompt: prompt.trim(),
-      refinedPrompt: [
-        "# Figma workspace task",
-        "",
-        `File: ${fileUrl}`,
-        "",
-        prompt.trim(),
-      ].join("\n"),
-      mode: "build",
-      priority: "medium",
-      acceptanceCriteria: [
-        "New screens remain visually consistent with the selected Figma file.",
-        "The AI proposal identifies frames, components, states, and responsive behavior.",
-      ],
-      verification: [
-        "Review the embedded Figma canvas and the generated design specification.",
-      ],
-      dependencyUids: [],
-      source: "manual",
-    });
-    onTaskCreated(task);
-    return task;
-  }
-
-  async function attachAndAskFigma() {
-    if (!api || !fileKey) return;
-    if (!prompt.trim()) {
-      toast.error("Tulis dulu screen atau flow yang ingin dibuat.");
-      return;
-    }
-    setBusy(true);
-    setActionStage("reading");
-    setActionResult("");
+  async function createTaskFromConversation(prompt: string, answer: string) {
+    if (!api || !project || !fileKey) return;
     try {
-      const targetTask = await ensureTargetTask();
-      if (!targetTask)
-        throw new Error(
-          "Pilih project atau task terlebih dahulu agar pekerjaan bisa dilacak.",
-        );
-      const connected = await api.post<ConnectedFile>(
-        `/api/tasks/${targetTask.uid}/connected-files/from-provider`,
+      const task = await api.post<Task>(`/api/projects/${project.uid}/tasks`, {
+        title: `Figma: ${prompt.trim().slice(0, 72)}`,
+        roughPrompt: prompt,
+        refinedPrompt: [
+          "# Figma workspace task",
+          "",
+          `File: ${fileUrl}`,
+          "",
+          "User request:",
+          prompt,
+          "",
+          "AI conversation result:",
+          answer,
+        ].join("\n"),
+        mode: "build",
+        priority: "medium",
+        acceptanceCriteria: [
+          "New screens remain visually consistent with the selected Figma file.",
+          "The AI proposal identifies frames, components, states, and responsive behavior.",
+        ],
+        verification: [
+          "Review the embedded Figma canvas and the generated design specification.",
+        ],
+        dependencyUids: [],
+        source: "manual",
+      });
+      await api.post<ConnectedFile>(
+        `/api/tasks/${task.uid}/connected-files/from-provider`,
         {
           provider: "figma",
           externalFileId: fileKey,
@@ -265,34 +238,10 @@ export function FigmaLiveModal({
           fileName: "Figma file",
         },
       );
-      if (prompt.trim()) {
-        setActionStage("thinking");
-        const action = await api.post<AiFileAction>(
-          `/api/tasks/${targetTask.uid}/ai-file-actions`,
-          {
-            connectedFileUid: connected.uid,
-            prompt: prompt.trim(),
-            actionType: "plan",
-            applyMode: "preview",
-            providerId: selectedProvider?.id,
-            modelId: modelId || undefined,
-          },
-        );
-        setActionResult(action.resultSummary || action.errorMessage || "");
-        setActionStage(action.status === "failed" ? "failed" : "ready");
-      } else {
-        setActionResult(
-          "Figma berhasil di-attach. Tulis instruksi agar AI membaca tree desain dan menyiapkan perubahan untuk direview.",
-        );
-      }
-      if (!prompt.trim()) setActionStage("ready");
-      setPreviewRevision((value) => value + 1);
-      toast.success(`Figma design brief prepared in KD-${targetTask.number}`);
+      onTaskCreated(task);
+      toast.success(`Figma task KD-${task.number} created explicitly`);
     } catch (error) {
-      setActionStage("failed");
       toast.error(error instanceof Error ? error.message : String(error));
-    } finally {
-      setBusy(false);
     }
   }
 
@@ -350,7 +299,7 @@ export function FigmaLiveModal({
       </header>
 
       <main className="scrollbar-thin min-h-0 flex-1 overflow-auto p-3 sm:p-4">
-        <div className="grid min-h-full gap-4 xl:grid-cols-[minmax(0,1fr)_320px]">
+        <div className="grid min-h-full gap-4 xl:grid-cols-[minmax(0,1fr)_420px]">
           <section className="space-y-4 rounded-2xl border border-border bg-elevated p-4">
             <div className="grid gap-3 sm:grid-cols-2">
               <div>
@@ -501,161 +450,55 @@ export function FigmaLiveModal({
                 </div>
               )}
             </div>
-
-            <div className="rounded-xl border border-border bg-panel p-3">
-              <p className="text-xs font-semibold">Design with AI</p>
-              <p className="mt-1 text-[11px] leading-5 text-muted">
-                Jelaskan screen/flow baru. KarsaDesk membaca canvas saat ini
-                agar hasilnya konsisten dengan desain login yang sudah ada.
-              </p>
-              <div className="mt-3 flex flex-wrap gap-1.5">
-                {[
-                  {
-                    label: "Register",
-                    value:
-                      "Pelajari halaman login yang tampil. Buat spesifikasi halaman register yang konsisten: nama, email, password, konfirmasi password, social signup, validation, loading, success, dan responsive mobile.",
-                  },
-                  {
-                    label: "OTP verification",
-                    value:
-                      "Pelajari halaman login yang tampil. Buat flow OTP verification yang konsisten: input 6 digit, countdown resend, error, expired code, success, loading, dan responsive mobile.",
-                  },
-                  {
-                    label: "Forgot password",
-                    value:
-                      "Pelajari halaman login yang tampil. Buat flow forgot password, email sent, reset password, success, error, dan semua state responsive dengan design system yang sama.",
-                  },
-                  {
-                    label: "Complete auth flow",
-                    value:
-                      "Gunakan login screen ini sebagai sumber visual. Rancang flow lengkap register, OTP verification, forgot password, reset password, success/error/loading states, desktop dan mobile. Jelaskan frame, component reuse, spacing, typography, dan prototype connections.",
-                  },
-                ].map((item) => (
-                  <button
-                    key={item.label}
-                    type="button"
-                    className="rounded-full border border-border bg-elevated px-2.5 py-1 text-[10px] text-muted transition hover:border-accent hover:text-accent"
-                    onClick={() => setPrompt(item.value)}
-                  >
-                    {item.label}
-                  </button>
-                ))}
-              </div>
-              <select
-                className={`${field} mt-3 text-xs`}
-                value={selectedTask?.uid || ""}
-                onChange={(event) =>
-                  onSelectTask(
-                    tasks.find((task) => task.uid === event.target.value) ||
-                      null,
-                  )
-                }
-              >
-                <option value="">Auto-create task dari prompt ini</option>
-                {tasks.map((task) => (
-                  <option key={task.uid} value={task.uid}>
-                    KD-{task.number} · {task.title}
-                  </option>
-                ))}
-              </select>
-              <textarea
-                className={`${field} mt-3 min-h-24 text-xs`}
-                value={prompt}
-                onChange={(event) => setPrompt(event.target.value)}
-                placeholder="Contoh: gunakan login ini sebagai acuan, lalu buat halaman register dan OTP lengkap dengan semua state desktop/mobile..."
-              />
-              <div
-                className="mt-3 grid grid-cols-3 gap-1 rounded-lg border border-border bg-elevated p-1 text-center text-[9px] uppercase tracking-wide"
-                aria-live="polite"
-              >
-                {[
-                  ["reading", "Read tree"],
-                  ["thinking", "AI review"],
-                  ["ready", "Result"],
-                ].map(([stage, label]) => {
-                  const order = ["idle", "reading", "thinking", "ready"];
-                  const active =
-                    actionStage !== "failed" &&
-                    order.indexOf(actionStage) >= order.indexOf(stage);
-                  return (
-                    <span
-                      key={stage}
-                      className={
-                        active
-                          ? "rounded bg-accent/10 px-1 py-1.5 text-accent"
-                          : actionStage === "failed" && stage === "reading"
-                            ? "rounded bg-danger/10 px-1 py-1.5 text-danger"
-                            : "rounded px-1 py-1.5 text-muted"
-                      }
-                    >
-                      {label}
-                    </span>
-                  );
-                })}
-              </div>
-              <Button
-                className="mt-3 w-full"
-                disabled={
-                  !fileKey ||
-                  !prompt.trim() ||
-                  !selectedProvider ||
-                  !modelId ||
-                  busy
-                }
-                onClick={() => void attachAndAskFigma()}
-              >
-                {busy ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : (
-                  <PlugZap className="size-4" />
-                )}
-                {actionStage === "reading"
-                  ? "Reading Figma tree..."
-                  : actionStage === "thinking"
-                    ? "AI reviewing design..."
-                    : "Generate design specification"}
-              </Button>
-              {actionResult && (
-                <MarkdownViewer
-                  dense
-                  className="scrollbar-thin mt-3 max-h-40 overflow-auto"
-                >
-                  {actionResult}
-                </MarkdownViewer>
-              )}
-            </div>
           </section>
 
-          <aside className="space-y-3 rounded-2xl border border-border bg-panel p-4 text-sm leading-6 text-muted">
-            <p className="font-medium text-foreground">Live workflow</p>
-            <ol className="list-decimal space-y-1 pl-4 text-xs">
-              <li>Connect OAuth/PAT sampai status connected.</li>
-              <li>Paste URL Figma file yang mau dibantu.</li>
-              <li>Pilih contoh prompt Register/OTP atau tulis sendiri.</li>
-              <li>
-                Pilih task existing, atau biarkan KarsaDesk membuat task baru
-                otomatis.
-              </li>
-              <li>
-                AI membaca metadata/tree Figma dan membuat preview rencana
-                perubahan untuk task itu.
-              </li>
-            </ol>
-            <div className="rounded-xl border border-success/30 bg-success/10 p-3 text-xs text-success">
-              Canvas preview aktif di KarsaDesk. Figma REST membaca file/tree;
-              perubahan canvas tetap memerlukan review dan Figma Plugin bridge
-              sebelum bisa diterapkan otomatis.
+          <div className="min-w-0 space-y-3">
+            <WorkspaceAiPanel
+              api={api}
+              project={project}
+              workspace="figma"
+              file={
+                fileKey
+                  ? {
+                      externalFileId: fileKey,
+                      externalFileUrl: fileUrl,
+                      fileType: "figma",
+                      fileName: "Selected Figma canvas",
+                    }
+                  : null
+              }
+              providerId={selectedProvider?.id || ""}
+              modelId={modelId}
+              suggestions={[
+                {
+                  label: "Understand canvas",
+                  value:
+                    "Jelaskan file Figma ini berisi halaman dan flow apa saja. Sebutkan frame, komponen, state, dan pola visual yang ditemukan. Jangan buat task atau mengklaim sudah mengubah canvas.",
+                },
+                {
+                  label: "Register",
+                  value:
+                    "Pelajari login screen ini. Usulkan halaman register yang konsisten: field, validation, loading, error, success, social signup, desktop dan mobile.",
+                },
+                {
+                  label: "OTP",
+                  value:
+                    "Pelajari login screen ini. Usulkan flow OTP verification lengkap: 6 digit, resend countdown, invalid/expired code, loading, success, desktop dan mobile.",
+                },
+                {
+                  label: "Complete auth flow",
+                  value:
+                    "Gunakan login screen sebagai visual source. Usulkan register, OTP, forgot/reset password, success/error/loading states, component reuse, responsive layout, dan prototype connections.",
+                },
+              ]}
+              onCreateTask={createTaskFromConversation}
+            />
+            <div className="rounded-xl border border-warning/30 bg-warning/10 p-3 text-[11px] leading-5 text-warning">
+              Percakapan tidak mengubah canvas. Setelah hasilnya benar, tekan
+              Create task. Pembuatan node/frame otomatis tetap membutuhkan Figma
+              Plugin bridge karena REST API hanya membaca metadata/tree.
             </div>
-            <Button
-              variant="secondary"
-              size="sm"
-              className="w-full"
-              onClick={() => void loadStatus()}
-              disabled={!api || busy}
-            >
-              Refresh status
-            </Button>
-          </aside>
+          </div>
         </div>
       </main>
     </div>

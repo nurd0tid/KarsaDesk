@@ -26,6 +26,7 @@ import type {
 import type { ApiClient } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { MarkdownViewer } from "@/components/markdown-viewer";
+import { WorkspaceAiPanel } from "@/components/workspace-ai-panel";
 import { cn } from "@/lib/utils";
 
 type WorkspaceKind = "docs" | "sheets" | "slides";
@@ -105,24 +106,18 @@ export function GoogleWorkspaceModal({
   onOpenChange,
   api,
   project,
-  tasks,
-  selectedTask,
   providers,
   initialProviderId,
   initialModelId,
-  onSelectTask,
   onTaskCreated,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   api: ApiClient | null;
   project: Project | null;
-  tasks: Task[];
-  selectedTask: Task | null;
   providers: Provider[];
   initialProviderId: string;
   initialModelId: string;
-  onSelectTask: (task: Task | null) => void;
   onTaskCreated: (task: Task) => void;
 }) {
   const fileInput = useRef<HTMLInputElement | null>(null);
@@ -140,6 +135,10 @@ export function GoogleWorkspaceModal({
   const [fileActionResult, setFileActionResult] = useState("");
   const [lastAction, setLastAction] = useState<AiFileAction | null>(null);
   const [previewRevision, setPreviewRevision] = useState(0);
+  const [previewMode, setPreviewMode] = useState<"api" | "visual">("api");
+  const [contextText, setContextText] = useState("");
+  const [contextBusy, setContextBusy] = useState(false);
+  const [contextError, setContextError] = useState("");
   const [actionStage, setActionStage] = useState<
     "idle" | "reading" | "thinking" | "ready" | "failed"
   >("idle");
@@ -202,6 +201,20 @@ export function GoogleWorkspaceModal({
     setFileActionResult("");
     setLastAction(null);
     setActionStage("idle");
+    setPreviewMode("api");
+    setContextText("");
+    setContextError("");
+    if (!api || !selectedFile || selectedFile.fileType === "figma") return;
+    setContextBusy(true);
+    void api
+      .get<{ text: string }>(
+        `/api/connect/google/files/${encodeURIComponent(selectedFile.externalFileId)}/context?fileType=${selectedFile.fileType}`,
+      )
+      .then((result) => setContextText(result.text))
+      .catch((error) =>
+        setContextError(error instanceof Error ? error.message : String(error)),
+      )
+      .finally(() => setContextBusy(false));
   }, [selectedFile?.externalFileId]);
 
   useEffect(() => {
@@ -337,18 +350,19 @@ export function GoogleWorkspaceModal({
     }
   }
 
-  async function ensureTargetTask() {
-    if (selectedTask) return selectedTask;
-    if (!api || !project || !selectedFile || !filePrompt.trim()) return null;
+  async function createTrackedTask(userPrompt: string, aiAnswer?: string) {
+    if (!api || !project || !selectedFile || !userPrompt.trim()) return null;
     const task = await api.post<Task>(`/api/projects/${project.uid}/tasks`, {
       title: `${kindMeta[kind].label}: ${selectedFile.fileName}`,
-      roughPrompt: filePrompt.trim(),
+      roughPrompt: userPrompt.trim(),
       refinedPrompt: [
         `# ${kindMeta[kind].label} workspace task`,
         "",
         `File: ${selectedFile.fileName}`,
         "",
-        filePrompt.trim(),
+        "User request:",
+        userPrompt.trim(),
+        ...(aiAnswer ? ["", "AI conversation result:", aiAnswer.trim()] : []),
       ].join("\n"),
       mode: "build",
       priority: "medium",
@@ -360,8 +374,28 @@ export function GoogleWorkspaceModal({
       dependencyUids: [],
       source: "manual",
     });
+    await api.post<ConnectedFile>(
+      `/api/tasks/${task.uid}/connected-files/from-provider`,
+      {
+        provider: selectedFile.provider,
+        externalFileId: selectedFile.externalFileId,
+        externalFileUrl: selectedFile.externalFileUrl,
+        fileType: selectedFile.fileType,
+        fileName: selectedFile.fileName,
+      },
+    );
     onTaskCreated(task);
     return task;
+  }
+
+  async function createTaskFromConversation(prompt: string, answer: string) {
+    try {
+      const task = await createTrackedTask(prompt, answer);
+      if (task)
+        toast.success(`Google workspace task KD-${task.number} created`);
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : String(error));
+    }
   }
 
   async function attachAndAskSelectedFile() {
@@ -374,21 +408,18 @@ export function GoogleWorkspaceModal({
     setActionStage("reading");
     setFileActionResult("");
     try {
-      const targetTask = await ensureTargetTask();
+      const targetTask = await createTrackedTask(filePrompt.trim());
       if (!targetTask)
         throw new Error(
           "Pilih project atau task terlebih dahulu agar pekerjaan bisa dilacak.",
         );
-      const connected = await api.post<ConnectedFile>(
-        `/api/tasks/${targetTask.uid}/connected-files/from-provider`,
-        {
-          provider: selectedFile.provider,
-          externalFileId: selectedFile.externalFileId,
-          externalFileUrl: selectedFile.externalFileUrl,
-          fileType: selectedFile.fileType,
-          fileName: selectedFile.fileName,
-        },
+      const connectedFiles = await api.get<{ files: ConnectedFile[] }>(
+        `/api/tasks/${targetTask.uid}/connected-files`,
       );
+      const connected = connectedFiles.files.find(
+        (file) => file.externalFileId === selectedFile.externalFileId,
+      );
+      if (!connected) throw new Error("Google file attachment was not created");
       if (filePrompt.trim()) {
         setActionStage("thinking");
         const action = await api.post<AiFileAction>(
@@ -684,7 +715,7 @@ export function GoogleWorkspaceModal({
               </MarkdownViewer>
             )}
 
-            <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[280px_minmax(420px,1fr)_320px]">
+            <div className="grid min-h-0 flex-1 gap-3 xl:grid-cols-[260px_minmax(480px,1fr)_420px]">
               <div className="scrollbar-thin min-h-0 space-y-2 overflow-auto">
                 {!google?.connected && (
                   <div className="grid h-full place-items-center rounded-xl border border-dashed border-border p-8 text-center">
@@ -766,24 +797,94 @@ export function GoogleWorkspaceModal({
                       Live preview dari file yang sedang dipilih
                     </p>
                   </div>
-                  <Button
-                    size="sm"
-                    variant="secondary"
-                    disabled={!selectedFile}
-                    onClick={() => setPreviewRevision((value) => value + 1)}
-                  >
-                    <RefreshCw className="size-3.5" /> Refresh
-                  </Button>
+                  <div className="flex items-center gap-1.5">
+                    <div className="flex rounded-lg border border-border bg-panel p-0.5 text-[10px]">
+                      <button
+                        className={cn(
+                          "rounded px-2 py-1",
+                          previewMode === "api"
+                            ? "bg-accent text-accent-foreground"
+                            : "text-muted",
+                        )}
+                        onClick={() => setPreviewMode("api")}
+                      >
+                        API text
+                      </button>
+                      <button
+                        className={cn(
+                          "rounded px-2 py-1",
+                          previewMode === "visual"
+                            ? "bg-accent text-accent-foreground"
+                            : "text-muted",
+                        )}
+                        onClick={() => setPreviewMode("visual")}
+                      >
+                        Google visual
+                      </button>
+                    </div>
+                    <Button
+                      size="sm"
+                      variant="secondary"
+                      disabled={!selectedFile}
+                      onClick={() => {
+                        if (previewMode === "visual")
+                          setPreviewRevision((value) => value + 1);
+                        else if (selectedFile) {
+                          setContextBusy(true);
+                          setContextError("");
+                          void api
+                            ?.get<{ text: string }>(
+                              `/api/connect/google/files/${encodeURIComponent(selectedFile.externalFileId)}/context?fileType=${selectedFile.fileType}`,
+                            )
+                            .then((result) => setContextText(result.text))
+                            .catch((error) =>
+                              setContextError(
+                                error instanceof Error
+                                  ? error.message
+                                  : String(error),
+                              ),
+                            )
+                            .finally(() => setContextBusy(false));
+                        }
+                      }}
+                    >
+                      <RefreshCw
+                        className={cn(
+                          "size-3.5",
+                          contextBusy && "animate-spin",
+                        )}
+                      />{" "}
+                      Refresh
+                    </Button>
+                  </div>
                 </div>
                 {selectedFile ? (
-                  <iframe
-                    key={`${selectedFile.externalFileId}:${previewRevision}`}
-                    title={`${selectedFile.fileName} preview`}
-                    src={googlePreviewUrl(selectedFile)}
-                    className="h-[min(620px,62vh)] min-h-[420px] w-full bg-white"
-                    allow="clipboard-read; clipboard-write; fullscreen"
-                    referrerPolicy="strict-origin-when-cross-origin"
-                  />
+                  previewMode === "visual" ? (
+                    <iframe
+                      key={`${selectedFile.externalFileId}:${previewRevision}`}
+                      title={`${selectedFile.fileName} preview`}
+                      src={googlePreviewUrl(selectedFile)}
+                      className="h-[min(720px,72vh)] min-h-[520px] w-full bg-white"
+                      allow="clipboard-read; clipboard-write; fullscreen"
+                      referrerPolicy="strict-origin-when-cross-origin"
+                    />
+                  ) : (
+                    <div className="scrollbar-thin h-[min(720px,72vh)] min-h-[520px] overflow-auto p-5">
+                      {contextBusy ? (
+                        <div className="grid h-full place-items-center text-sm text-muted">
+                          <Loader2 className="size-6 animate-spin" />
+                        </div>
+                      ) : contextError ? (
+                        <div className="rounded-xl border border-danger/30 bg-danger/5 p-4 text-sm text-danger">
+                          API preview failed: {contextError}
+                        </div>
+                      ) : (
+                        <pre className="whitespace-pre-wrap break-words font-mono text-xs leading-6 text-foreground">
+                          {contextText || "No readable text was returned."}
+                        </pre>
+                      )}
+                    </div>
+                  )
                 ) : (
                   <div className="grid min-h-[420px] place-items-center p-8 text-center text-sm text-muted">
                     Pilih file di sebelah kiri untuk membuka preview Docs,
@@ -791,93 +892,27 @@ export function GoogleWorkspaceModal({
                   </div>
                 )}
               </section>
-              <aside className="min-h-0 rounded-xl border border-border bg-elevated p-3">
-                <p className="text-xs font-semibold">Selected file</p>
-                {selectedFile ? (
-                  <div className="mt-3 space-y-3">
-                    <div className="rounded-lg border border-border bg-panel p-3">
-                      <p className="truncate text-sm font-medium">
-                        {selectedFile.fileName}
-                      </p>
-                      <p className="mt-1 text-[11px] text-muted">
-                        Prompt dapat memakai task yang ada atau otomatis membuat
-                        task workspace baru.
-                      </p>
-                    </div>
-                    <select
-                      className={`${field} text-xs`}
-                      value={selectedTask?.uid || ""}
-                      onChange={(event) =>
-                        onSelectTask(
-                          tasks.find(
-                            (task) => task.uid === event.target.value,
-                          ) || null,
-                        )
-                      }
-                    >
-                      <option value="">Auto-create task dari prompt ini</option>
-                      {tasks.map((task) => (
-                        <option key={task.uid} value={task.uid}>
-                          KD-{task.number} · {task.title}
-                        </option>
-                      ))}
-                    </select>
-                    <textarea
-                      className={`${field} min-h-28 text-xs`}
-                      value={filePrompt}
-                      onChange={(event) => setFilePrompt(event.target.value)}
-                      placeholder="Prompt untuk file ini. Contoh: ringkas dokumen, buat outline revisi, cek tabel, susun slide..."
-                    />
-                    <div
-                      className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-panel p-1 text-center text-[9px] uppercase tracking-wide"
-                      aria-live="polite"
-                    >
-                      {[
-                        ["reading", "Read file"],
-                        ["thinking", "AI draft"],
-                        ["ready", "Review"],
-                      ].map(([stage, label]) => {
-                        const order = ["idle", "reading", "thinking", "ready"];
-                        const active =
-                          actionStage !== "failed" &&
-                          order.indexOf(actionStage) >= order.indexOf(stage);
-                        return (
-                          <span
-                            key={stage}
-                            className={cn(
-                              "rounded px-1 py-1.5 text-muted",
-                              active && "bg-accent/10 text-accent",
-                              actionStage === "failed" &&
-                                stage === "reading" &&
-                                "bg-danger/10 text-danger",
-                            )}
-                          >
-                            {label}
-                          </span>
-                        );
-                      })}
-                    </div>
-                    <Button
-                      className="w-full"
-                      disabled={
-                        busy ||
-                        !filePrompt.trim() ||
-                        !selectedProvider ||
-                        !modelId
-                      }
-                      onClick={() => void attachAndAskSelectedFile()}
-                    >
-                      {busy ? (
-                        <Loader2 className="size-4 animate-spin" />
-                      ) : (
-                        <Wand2 className="size-4" />
-                      )}
-                      {actionStage === "reading"
-                        ? "Reading file..."
-                        : actionStage === "thinking"
-                          ? "AI preparing revision..."
-                          : "Attach & prepare AI revision"}
-                    </Button>
+              <div className="min-w-0 space-y-3">
+                <WorkspaceAiPanel
+                  api={api}
+                  project={project}
+                  workspace="google"
+                  file={
+                    selectedFile && selectedFile.fileType !== "figma"
+                      ? {
+                          externalFileId: selectedFile.externalFileId,
+                          externalFileUrl: selectedFile.externalFileUrl,
+                          fileType: selectedFile.fileType,
+                          fileName: selectedFile.fileName,
+                        }
+                      : null
+                  }
+                  providerId={selectedProvider?.id || ""}
+                  modelId={modelId}
+                  onCreateTask={createTaskFromConversation}
+                />
+                {selectedFile && (
+                  <>
                     <Button
                       className="w-full"
                       variant="secondary"
@@ -887,44 +922,110 @@ export function GoogleWorkspaceModal({
                     >
                       <ExternalLink className="size-4" /> Open original
                     </Button>
-                    {fileActionResult && (
-                      <MarkdownViewer
-                        dense
-                        className="scrollbar-thin max-h-40 overflow-auto"
-                      >
-                        {fileActionResult}
-                      </MarkdownViewer>
-                    )}
-                    {lastAction?.status === "needs_confirmation" && (
-                      <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
-                        <p className="text-[11px] leading-5 text-warning">
-                          Review proposal di atas. Apply tidak mengganti isi
-                          lama: Docs ditambahkan di akhir, Sheets menambahkan
-                          rows, dan Slides membuat slide baru.
+                    <details className="overflow-hidden rounded-xl border border-border bg-elevated">
+                      <summary className="cursor-pointer px-3 py-2.5 text-xs font-semibold">
+                        Prepare an actual Google change
+                      </summary>
+                      <div className="space-y-3 border-t border-border p-3">
+                        <p className="text-[10px] leading-4 text-muted">
+                          Ini berbeda dari Ask AI: tombol di bawah akan membuat
+                          task Google secara eksplisit dan menyiapkan revisi
+                          untuk approval.
                         </p>
+                        <textarea
+                          className={`${field} min-h-28 text-xs`}
+                          value={filePrompt}
+                          onChange={(event) =>
+                            setFilePrompt(event.target.value)
+                          }
+                          placeholder="Contoh: tambahkan ringkasan dua paragraf di akhir dokumen..."
+                        />
+                        <div
+                          className="grid grid-cols-3 gap-1 rounded-lg border border-border bg-panel p-1 text-center text-[9px] uppercase tracking-wide"
+                          aria-live="polite"
+                        >
+                          {[
+                            ["reading", "Read file"],
+                            ["thinking", "AI draft"],
+                            ["ready", "Review"],
+                          ].map(([stage, label]) => {
+                            const order = [
+                              "idle",
+                              "reading",
+                              "thinking",
+                              "ready",
+                            ];
+                            const active =
+                              actionStage !== "failed" &&
+                              order.indexOf(actionStage) >=
+                                order.indexOf(stage);
+                            return (
+                              <span
+                                key={stage}
+                                className={cn(
+                                  "rounded px-1 py-1.5 text-muted",
+                                  active && "bg-accent/10 text-accent",
+                                  actionStage === "failed" &&
+                                    stage === "reading" &&
+                                    "bg-danger/10 text-danger",
+                                )}
+                              >
+                                {label}
+                              </span>
+                            );
+                          })}
+                        </div>
                         <Button
-                          className="mt-2 w-full"
-                          disabled={busy}
-                          onClick={() => void applyGoogleRevision()}
+                          className="w-full"
+                          disabled={
+                            busy ||
+                            !filePrompt.trim() ||
+                            !selectedProvider ||
+                            !modelId
+                          }
+                          onClick={() => void attachAndAskSelectedFile()}
                         >
                           {busy ? (
                             <Loader2 className="size-4 animate-spin" />
                           ) : (
                             <Wand2 className="size-4" />
                           )}
-                          Apply approved revision to Google
+                          {actionStage === "reading"
+                            ? "Reading file..."
+                            : actionStage === "thinking"
+                              ? "AI preparing revision..."
+                              : "Create change task & preview"}
                         </Button>
+                        {fileActionResult && (
+                          <MarkdownViewer
+                            dense
+                            className="scrollbar-thin max-h-72 overflow-auto"
+                          >
+                            {fileActionResult}
+                          </MarkdownViewer>
+                        )}
+                        {lastAction?.status === "needs_confirmation" && (
+                          <div className="rounded-lg border border-warning/30 bg-warning/10 p-3">
+                            <p className="text-[11px] leading-5 text-warning">
+                              Docs append content, Sheets append rows, dan
+                              Slides membuat slide baru. Tidak ada isi lama yang
+                              dihapus.
+                            </p>
+                            <Button
+                              className="mt-2 w-full"
+                              disabled={busy}
+                              onClick={() => void applyGoogleRevision()}
+                            >
+                              <Wand2 className="size-4" /> Apply approved
+                              revision
+                            </Button>
+                          </div>
+                        )}
                       </div>
-                    )}
-                  </div>
-                ) : (
-                  <p className="mt-3 text-xs leading-5 text-muted">
-                    Pilih file dari daftar Drive. Setelah itu KarsaDesk bisa
-                    attach file ke task yang sedang dipilih dan membuat preview
-                    rencana perubahan.
-                  </p>
+                    </details>
+                  </>
                 )}
-              </aside>
+              </div>
             </div>
           </section>
         </div>
