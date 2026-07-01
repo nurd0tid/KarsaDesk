@@ -57,6 +57,7 @@ import {
   Cpu,
   CheckCircle2,
   SquareX,
+  XCircle,
   FilePlus,
   FileMinus,
   FileQuestion,
@@ -533,6 +534,59 @@ function flattenTree(nodes: FileNode[]): FileNode[] {
   return result;
 }
 
+function flattenTreePaths(nodes: FileNode[], prefix = ''): string[] {
+  const result: string[] = [];
+  for (const node of nodes) {
+    const fullPath = prefix ? `${prefix}/${node.name}` : node.name;
+    result.push(fullPath);
+    if (node.isDirectory && node.children) {
+      result.push(...flattenTreePaths(node.children, fullPath));
+    }
+  }
+  return result;
+}
+
+function ToolCallStep({ step }: { step: AgentStep }) {
+  const [userCollapsed, setUserCollapsed] = useState(false);
+  const endRef = useRef<HTMLDivElement>(null);
+  const isFinished = !!step.toolOutput;
+  const isOpen = !isFinished || !userCollapsed;
+
+  useEffect(() => {
+    if (isOpen && endRef.current) {
+      endRef.current.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+  }, [step.toolOutput, isOpen]);
+
+  return (
+    <div className="border border-[#3a3a3a] rounded bg-[#252526] overflow-hidden">
+      <button
+        onClick={() => { if (isFinished) setUserCollapsed(!userCollapsed); }}
+        className={`flex items-center gap-2 px-2.5 py-1.5 w-full text-left text-[10px] bg-[#2d2d2d] hover:bg-[#333] transition-colors ${!isFinished ? 'cursor-default' : 'cursor-pointer'}`}
+      >
+        {!step.toolOutput ? (
+          <Loader2 className="size-3 animate-spin text-[#007acc]" />
+        ) : step.isError ? (
+          <XCircle className="size-3 text-[#c74e39]" />
+        ) : (
+          <CheckCircle2 className="size-3 text-[#4ec9b0]" />
+        )}
+        <span className="text-[#cccccc] font-mono">{step.toolName}</span>
+        {!!(step.toolArgs?.path) && (
+          <span className="text-[#888] truncate">{String(step.toolArgs.path)}</span>
+        )}
+        <ChevronDown className={`size-3 text-[#666] ml-auto transition-transform ${isOpen ? 'rotate-0' : '-rotate-90'}`} />
+      </button>
+      {isOpen && (
+        <div className="max-h-48 overflow-y-auto p-2 text-[10px] font-mono text-[#888] bg-[#1e1e1e] whitespace-pre-wrap">
+          {step.toolOutput || 'Running...'}
+          <div ref={endRef} />
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AiMessageBubble({ role, content, steps, model }: { role: string; content: string; steps?: AgentStep[]; model?: string }) {
   const isUser = role === 'user';
   const isSystem = role === 'system';
@@ -591,34 +645,7 @@ function AiMessageBubble({ role, content, steps, model }: { role: string; conten
                 );
               }
               if (step.type === 'tool_call') {
-                const hasResult = !!step.toolOutput;
-                const hasError = hasResult && step.isError;
-                return (
-                  <details key={idx} className="group">
-                    <summary className="flex items-center gap-2 text-[10px] bg-[#1e1e1e] border border-[#333] rounded px-2 py-1.5 cursor-pointer select-none hover:bg-[#252526] transition-colors">
-                      <ChevronRight className="size-3 group-open:hidden text-[#888]" />
-                      <ChevronDown className="size-3 hidden group-open:block text-[#888]" />
-                      <FolderOpen className="size-3 text-[#dcb67a]" />
-                      <span className="text-[#cccccc] font-mono truncate flex-1">
-                        {step.toolName}
-                      </span>
-                      {!hasResult && (
-                        <Loader2 className="size-3 text-[#4ec9b0] ml-auto animate-spin flex-shrink-0" />
-                      )}
-                      {hasResult && !hasError && (
-                        <CheckCircle2 className="size-3 text-[#4ec9b0] ml-auto flex-shrink-0" />
-                      )}
-                      {hasError && (
-                        <AlertTriangle className="size-3 text-[#c74e39] ml-auto flex-shrink-0" />
-                      )}
-                    </summary>
-                    {hasResult && (
-                      <div className={`mt-1 mb-1 text-[10px] rounded p-2 border font-mono overflow-x-auto whitespace-pre-wrap break-all ${hasError ? 'bg-[#3b1b1b] text-[#f48771] border-[#7a2c2c]' : 'bg-[#1a1a1a] text-[#888] border-[#333]'}`}>
-                        {step.toolOutput}
-                      </div>
-                    )}
-                  </details>
-                );
+                return <ToolCallStep key={idx} step={step} />;
               }
               return null;
             })}
@@ -682,6 +709,7 @@ export default function WorkspacePage() {
   const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
   const [isSidebarOpen, setIsSidebarOpen] = useState(true);
   const [skillMenuOpen, setSkillMenuOpen] = useState(false);
+  const [skillQuery, setSkillQuery] = useState('');
   const [commandMenuOpen, setCommandMenuOpen] = useState(false);
   const [sessionsMenuOpen, setSessionsMenuOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
@@ -887,6 +915,8 @@ export default function WorkspacePage() {
           providerId: effectiveProviderId,
           model: effectiveModelId,
           skill,
+          projectPath,
+          projectId: activeProjectId,
         }),
         signal: abortControllerRef.current.signal,
       });
@@ -1541,16 +1571,23 @@ export default function WorkspacePage() {
 
               {/* Skill menu popup */}
               {skillMenuOpen && (
-                <div className="absolute bottom-full left-2 right-2 mb-1 bg-[#2d2d2d] border border-[#3a3a3a] rounded-lg shadow-xl z-30 overflow-hidden">
+                <div className="absolute bottom-full left-2 right-2 mb-1 bg-[#2d2d2d] border border-[#3a3a3a] rounded-lg shadow-xl z-30 overflow-hidden max-h-60 overflow-y-auto flex flex-col">
                   {AI_SKILLS.filter(s =>
-                    aiInput.match(/@([\w-]*)$/) ? s.id.startsWith(aiInput.match(/@([\w-]*)$/)![1]) : true
+                    skillQuery ? s.id.toLowerCase().includes(skillQuery.toLowerCase()) : true
+                  ).length > 0 && (
+                    <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#888] bg-[#1e1e1e] sticky top-0">
+                      Skills
+                    </div>
+                  )}
+                  {AI_SKILLS.filter(s =>
+                    skillQuery ? s.id.toLowerCase().includes(skillQuery.toLowerCase()) : true
                   ).map(s => (
                     <button
                       key={s.id}
-                      className="w-full flex items-start gap-2 px-3 py-2 hover:bg-[#094771] text-left transition-colors"
+                      className="w-full flex items-start gap-2 px-3 py-2 hover:bg-[#094771] text-left transition-colors flex-shrink-0"
                       onMouseDown={(e) => {
                         e.preventDefault();
-                        const newVal = aiInput.replace(/@[\w-]*$/, `@${s.id} `);
+                        const newVal = aiInput.replace(/@[\w./\\-]*$/, `@${s.id} `);
                         setAiInput(newVal);
                         setSkillMenuOpen(false);
                         aiTextareaRef.current?.focus();
@@ -1558,6 +1595,32 @@ export default function WorkspacePage() {
                     >
                       <span className="text-[#4ec9b0] text-xs font-mono font-semibold">{s.label}</span>
                       <span className="text-[10px] text-[#888]">{s.description}</span>
+                    </button>
+                  ))}
+                  
+                  {flattenTreePaths(fileTree).filter(f =>
+                    skillQuery ? f.toLowerCase().includes(skillQuery.toLowerCase()) : true
+                  ).length > 0 && (
+                    <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[#888] bg-[#1e1e1e] sticky top-0 border-t border-[#3a3a3a]">
+                      Project Files
+                    </div>
+                  )}
+                  {flattenTreePaths(fileTree).filter(f =>
+                    skillQuery ? f.toLowerCase().includes(skillQuery.toLowerCase()) : true
+                  ).slice(0, 20).map(f => (
+                    <button
+                      key={f}
+                      className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-[#094771] text-left transition-colors flex-shrink-0"
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        const newVal = aiInput.replace(/@[\w./\\-]*$/, `@${f} `);
+                        setAiInput(newVal);
+                        setSkillMenuOpen(false);
+                        aiTextareaRef.current?.focus();
+                      }}
+                    >
+                      <FileCode className="size-3 text-[#519aba] flex-shrink-0" />
+                      <span className="text-[#cccccc] text-xs font-mono truncate">{f}</span>
                     </button>
                   ))}
                 </div>
@@ -1599,7 +1662,7 @@ export default function WorkspacePage() {
                     const selectionStart = e.target.selectionStart;
                     const beforeCursor = value.slice(0, selectionStart);
                     const slashMatch = value.match(/^\/([\w-]*)$/);
-                    const lastAtMatch = beforeCursor.match(/@([\w-]*)$/);
+                    const lastAtMatch = beforeCursor.match(/@([\w./\\-]*)$/);
                     const lastHashMatch = beforeCursor.match(/#([\w./\\-]*)$/);
                     if (slashMatch) {
                       setCommandMenuOpen(true);
@@ -1608,6 +1671,7 @@ export default function WorkspacePage() {
                       setSessionsMenuOpen(false);
                     } else if (lastAtMatch) {
                       setSkillMenuOpen(true);
+                      setSkillQuery(lastAtMatch[1]);
                       setFileSearchOpen(false);
                       setCommandMenuOpen(false);
                       setSessionsMenuOpen(false);

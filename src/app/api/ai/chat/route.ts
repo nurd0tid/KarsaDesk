@@ -1,4 +1,4 @@
-import { getRecord } from '@/lib/nocodb';
+import { getRecord, createRecord, updateRecord } from '@/lib/nocodb';
 import { getProviderLocalConfig, resolveApiKey } from '@/lib/local-config';
 import { getField } from '@/lib/nocodb-fields';
 import type { Provider } from '@/types';
@@ -103,7 +103,7 @@ function parseToolCalls(text: string): Array<{ name: string; args: Record<string
 
 export async function POST(req: Request) {
   try {
-    const { messages, providerId, model, skill, projectPath } = await req.json();
+    const { messages, providerId, model, skill, projectPath, projectId } = await req.json();
 
     if (!providerId) {
       return new Response(JSON.stringify({ error: 'No providerId specified' }), { status: 400 });
@@ -171,6 +171,20 @@ RULES:
 
 When you need to use a tool, output the <tool_use> block. The system will execute it and return the result.`;
 
+    let runId: number | null = null;
+    try {
+      const runRecord = await createRecord<Record<string, any>>('agent_runs', {
+        'Agent Name': 'VibeForge AI',
+        'Provider ID': provider.Id,
+        'Model': targetModel,
+        'Skill': skill || 'chat',
+        'Status': 'running',
+        'Started At': new Date().toISOString(),
+        'Input Summary': messages[messages.length - 1]?.content?.slice(0, 300) || '',
+      });
+      runId = runRecord.Id;
+    } catch (e) { console.error('Failed to log agent run:', e); }
+
     const encoder = new TextEncoder();
     const stream = new ReadableStream({
       async start(controller) {
@@ -189,6 +203,7 @@ When you need to use a tool, output the <tool_use> block. The system will execut
 
           const MAX_ITERATIONS = 8;
           let iteration = 0;
+          let fullOutputText = '';
 
           while (iteration < MAX_ITERATIONS) {
             iteration++;
@@ -228,6 +243,7 @@ When you need to use a tool, output the <tool_use> block. The system will execut
                 .replace(/<tool_use>[\s\S]*?<\/tool_use>/g, '')
                 .replace(/```tool[\s\S]*?```/g, '')
                 .trim();
+              fullOutputText = cleanText;
               emit('content', { delta: cleanText });
               break;
             }
@@ -270,9 +286,24 @@ When you need to use a tool, output the <tool_use> block. The system will execut
             });
           }
 
+          if (runId) {
+            try { await updateRecord('agent_runs', runId, {
+              'Status': 'completed',
+              'Finished At': new Date().toISOString(),
+              'Output Summary': (fullOutputText || '').slice(0, 300),
+            }); } catch {}
+          }
+
           emit('done', {});
         } catch (e: unknown) {
           const msg = e instanceof Error ? e.message : String(e);
+          if (runId) {
+            try { await updateRecord('agent_runs', runId, {
+              'Status': 'failed',
+              'Finished At': new Date().toISOString(),
+              'Error Message': msg.slice(0, 200),
+            }); } catch {}
+          }
           emit('content', { delta: `\n\n⚠️ Agent Error: ${msg}` });
           emit('done', {});
         } finally {
