@@ -1,0 +1,74 @@
+# VibeForge .clinerules
+
+You are working on VibeForge.
+
+## Must Read
+
+Before changing code, read:
+
+- AGENTS.md
+- CLAUDE.md
+- MASTER_PROMPT.md
+- SESSION.md
+- NEXT_ACTION.md
+- docs/ai/project-context.md
+- docs/standards/definition-of-done.md
+- docs/workflow/development-workflow.md
+- docs/ui-ux/ui-ux-standard.md
+- docs/database/nocodb-schema.md
+
+Also read `b2b-template/docs/ai` if present.
+
+## Never Mark Done If Blocked
+
+A task is not done if:
+
+- There is a blocker.
+- There is a known bug.
+- Typecheck fails.
+- Build fails.
+- Lint fails.
+- Acceptance criteria are incomplete.
+- NocoDB sync is missing.
+- Daily log is missing.
+- Context update is needed but not done.
+- UI states are missing.
+- Old branding remains.
+
+Use `blocked`, `in_progress`, `review`, or `testing`.
+
+## No Report-Only Completion
+
+Do not only report progress in chat.
+
+Save progress to:
+
+- NocoDB daily logs
+- NocoDB task updates
+- NocoDB agent logs
+- Markdown context files when needed
+
+## Continue Working
+
+After completing a task:
+
+1. Update task status.
+2. Create daily log.
+3. Update context if needed.
+4. Pick the next task.
+5. Continue.
+
+## UI Rule
+
+The app must feel like VS Code.
+
+Do not build a generic admin dashboard.
+
+## MCP Rule
+
+Use Context7 for package docs.
+Use Sequential Thinking for complex tasks.
+
+## Secret Rule
+
+You may read `.env.local` for development, but never reveal, copy, commit, or log secrets.

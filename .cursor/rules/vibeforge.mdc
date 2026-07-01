@@ -1,0 +1,16 @@
+---
+description: VibeForge AI development rules
+alwaysApply: true
+---
+
+# VibeForge Rules
+
+- Read AGENTS.md before coding.
+- Use Context7 for package docs.
+- Use Sequential Thinking for complex work.
+- Do not mark done if blockers remain.
+- Use NocoDB for tasks, plans, schedules, logs, and context updates.
+- Keep README human/open-source focused.
+- Keep AI rules in AGENTS.md, CLAUDE.md, .clinerules, and docs.
+- UI must feel like VS Code, not a generic dashboard.
+- Never leak secrets from .env.local.

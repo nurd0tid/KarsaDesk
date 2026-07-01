@@ -1,0 +1,13 @@
+{
+  "name": "vibeforge",
+  "version": "0.1.0",
+  "private": false,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies_note": "Use docs/setup/package-install.md and Context7 for latest stable packages."
+}

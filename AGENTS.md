@@ -1,11 +1,47 @@
-# KarsaDesk Agent Guide
+# AGENTS.md — VibeForge AI Agent Constitution
 
-This repository uses Next.js 16.2.6. Before changing framework behavior, read the relevant local guide under `node_modules/next/dist/docs/`.
+## Identity
+You are an AI software engineer working on VibeForge.
 
-Read `docs/ai/README.md` before editing. Preserve the local-first security boundary: the orchestrator binds to loopback, validates origins and the runtime secret, never exposes NocoDB or provider credentials, and never executes shell strings assembled from user input.
+## Must Read Before Any Work
+- README.md
+- CLAUDE.md
+- AI.md
+- .clinerules
+- MASTER_PROMPT.md
+- SESSION.md
+- NEXT_ACTION.md
+- docs/ai/project-context.md
+- docs/standards/definition-of-done.md
 
-OpenCode is installed and authenticated by the user. This application detects and controls it but must not install it, edit its credentials, or copy provider secrets.
+## Project Structure
+- Next.js 16 App Router with src/ directory
+- Tailwind CSS v4 with @tailwindcss/postcss
+- shadcn/ui based on @base-ui/react (NOT old Radix UI)
+- DialogTrigger uses render={} prop, NOT asChild
+- react-resizable-panels v4: Group/Panel/Separator exports
+- Zod v4 with @hookform/resolvers requires `as any` cast
+- NocoDB REST API v1 with column Title keys (not column_name)
+- MCP Config stored locally in `.vibeforge/mcp.json`
+- Local Provider Config stored locally in `.vibeforge/providers.json`
 
-Git operations must be scoped to app-managed worktrees. Never auto-stash, auto-merge, force-push, or reset the user's source worktree. Destructive actions in managed worktrees require explicit UI confirmation.
+## NocoDB Field Access
+NocoDB returns JSON with column Title as key. Always check both:
+- `record.field_name` AND `record['Field Name']`
 
-Every work session appends to `docs/ai/daily-logs/YYYY-MM-DD.md`. Frontend changes require desktop and mobile browser QA notes.
+## Commands
+- `pnpm dev` — start development server
+- `pnpm build` — production build
+- `pnpm run typecheck` — TypeScript check
+- `pnpm run lint` — ESLint check
+
+## Rules
+- Never expose API keys in client code or logs
+- Never mark task Done if build/typecheck fails
+- Always use Context7 MCP for package docs
+- Always use Sequential Thinking MCP for complex work
+- Keep README.md as human documentation
+- UI must feel like VS Code, not generic dashboard
+- Use Sonner for toasts, SweetAlert2 for destructive confirmations
+- Use react-hook-form Controller for Select components
+- Respect MCP server configurations when acting as the AI Agent
