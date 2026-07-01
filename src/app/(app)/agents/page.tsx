@@ -10,6 +10,7 @@ import { Bot, RefreshCw, CheckCircle2, XCircle, Clock, Activity, Zap, BarChart2 
 import { ErrorState } from '@/components/common/ErrorState';
 import { EmptyState } from '@/components/common/EmptyState';
 import { formatDistanceToNow, differenceInMilliseconds, subHours, format } from 'date-fns';
+import { Area, AreaChart, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
 import { getField } from '@/lib/nocodb-fields';
 import type { AgentRun, NocoDBListResponse } from '@/types';
 
@@ -50,17 +51,6 @@ function formatLatency(ms: number): string {
   return `${(ms / 1000).toFixed(1)}s`;
 }
 
-const SVG_WIDTH = 800;
-const SVG_HEIGHT = 180;
-const PAD_LEFT = 46;
-const PAD_RIGHT = 12;
-const PAD_TOP = 12;
-const PAD_BOTTOM = 28;
-const CHART_W = SVG_WIDTH - PAD_LEFT - PAD_RIGHT;
-const CHART_H = SVG_HEIGHT - PAD_TOP - PAD_BOTTOM;
-const CHART_X0 = PAD_LEFT;
-const CHART_Y1 = PAD_TOP + CHART_H;
-
 function buildBuckets(runs: AgentRun[]) {
   const now = new Date();
   const buckets = Array.from({ length: 24 }, (_, i) => {
@@ -86,62 +76,54 @@ function buildBuckets(runs: AgentRun[]) {
 }
 
 function UsageChart({ buckets }: { buckets: ReturnType<typeof buildBuckets> }) {
-  const counts = buckets.map(b => b.count);
-  const rawMax = Math.max(...counts, 1);
-  const niceMax = rawMax <= 4 ? 4 : rawMax <= 10 ? 10 : rawMax <= 20 ? 20 : Math.ceil(rawMax / 5) * 5;
-  const ticks = [0, 0.25, 0.5, 0.75, 1].map(t => Math.round(t * niceMax));
-
-  const pts = buckets.map((b, i) => {
-    const x = CHART_X0 + (i / 23) * CHART_W;
-    const y = CHART_Y1 - (b.count / niceMax) * CHART_H;
-    return { x, y };
-  });
-
-  const linePath = pts.map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ');
-  const areaPath = `M ${CHART_X0.toFixed(2)} ${CHART_Y1.toFixed(2)} ${pts.map(p => `L ${p.x.toFixed(2)} ${p.y.toFixed(2)}`).join(' ')} L ${(CHART_X0 + CHART_W).toFixed(2)} ${CHART_Y1.toFixed(2)} Z`;
-
-  const labelIndices = buckets.map((_, i) => i).filter(i => i % 4 === 0 || i === 23);
-
   return (
-    <svg viewBox={`0 0 ${SVG_WIDTH} ${SVG_HEIGHT}`} className="w-full h-full" preserveAspectRatio="none">
-      <defs>
-        <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="rgb(59,130,246)" stopOpacity="0.35" />
-          <stop offset="100%" stopColor="rgb(59,130,246)" stopOpacity="0.02" />
-        </linearGradient>
-      </defs>
-
-      {ticks.map((t, i) => {
-        const y = CHART_Y1 - (t / niceMax) * CHART_H;
-        return (
-          <g key={i}>
-            <line x1={CHART_X0} y1={y} x2={CHART_X0 + CHART_W} y2={y} stroke="currentColor" strokeOpacity="0.08" strokeWidth="1" />
-            <text x={CHART_X0 - 6} y={y + 4} textAnchor="end" fontSize="10" fill="currentColor" fillOpacity="0.5">
-              {t}
-            </text>
-          </g>
-        );
-      })}
-
-      <path d={areaPath} fill="url(#areaGrad)" />
-
-      <path d={linePath} fill="none" stroke="rgb(59,130,246)" strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
-
-      {labelIndices.map(i => {
-        const x = CHART_X0 + (i / 23) * CHART_W;
-        return (
-          <text key={i} x={x} y={SVG_HEIGHT - 4} textAnchor="middle" fontSize="9" fill="currentColor" fillOpacity="0.45">
-            {buckets[i].label}
-          </text>
-        );
-      })}
-
-      {pts.map((p, i) => (
-        buckets[i].count > 0 && (
-          <circle key={i} cx={p.x} cy={p.y} r="2.5" fill="rgb(59,130,246)" fillOpacity="0.9" />
-        )
-      ))}
-    </svg>
+    <ResponsiveContainer width="100%" height="100%">
+      <AreaChart
+        data={buckets}
+        margin={{ top: 10, right: 10, left: -20, bottom: 0 }}
+      >
+        <defs>
+          <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="5%" stopColor="#007acc" stopOpacity={0.3} />
+            <stop offset="95%" stopColor="#007acc" stopOpacity={0} />
+          </linearGradient>
+        </defs>
+        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="rgba(255, 255, 255, 0.05)" />
+        <XAxis
+          dataKey="label"
+          tickLine={false}
+          axisLine={false}
+          fontSize={10}
+          stroke="rgba(255, 255, 255, 0.4)"
+          dy={10}
+          interval={3}
+        />
+        <YAxis
+          tickLine={false}
+          axisLine={false}
+          fontSize={10}
+          stroke="rgba(255, 255, 255, 0.4)"
+          allowDecimals={false}
+        />
+        <Tooltip
+          contentStyle={{
+            backgroundColor: '#1e1e1e',
+            border: '1px solid rgba(255, 255, 255, 0.1)',
+            borderRadius: '4px',
+            fontSize: '11px',
+          }}
+          labelClassName="text-white"
+        />
+        <Area
+          type="monotone"
+          dataKey="count"
+          stroke="#007acc"
+          strokeWidth={2}
+          fillOpacity={1}
+          fill="url(#areaGrad)"
+        />
+      </AreaChart>
+    </ResponsiveContainer>
   );
 }
 
